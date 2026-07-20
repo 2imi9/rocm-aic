@@ -16,6 +16,8 @@
 [![Nightly Cliff](https://github.com/ROCm/rocm-aic/actions/workflows/aic-amd-nightly-cliff.yml/badge.svg)](https://github.com/ROCm/rocm-aic/actions/workflows/aic-amd-nightly-cliff.yml)
 [![Nightly Wheels](https://github.com/ROCm/rocm-aic/actions/workflows/aic-nightly-wheels.yml/badge.svg)](https://github.com/ROCm/rocm-aic/actions/workflows/aic-nightly-wheels.yml)
 [![Nightly Patch Validation](https://github.com/ROCm/rocm-aic/actions/workflows/aic-patches.yml/badge.svg)](https://github.com/ROCm/rocm-aic/actions/workflows/aic-patches.yml)
+[![Monitoring CPU Smoke](https://github.com/ROCm/rocm-aic/actions/workflows/aic-monitoring-cpu-smoke.yml/badge.svg)](https://github.com/ROCm/rocm-aic/actions/workflows/aic-monitoring-cpu-smoke.yml)
+[![Metrics Reference](https://img.shields.io/badge/Prometheus-Metrics_Reference-E05D00?logo=prometheus&logoColor=white)](https://rocm.github.io/rocm-aic/)
 
 > [!CAUTION]
 > This release is an *early-access* software technology preview. Running
