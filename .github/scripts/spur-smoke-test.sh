@@ -3,7 +3,9 @@ set -euo pipefail
 
 # Runs on the self-hosted runner; SSHes to the SPUR head node (AIC_SPUR_HOST) and runs smoke-test
 # against the tarball produced by spur-dist-build.sh for the same SHA.
-# Always cleans up the clone and tarball dir on exit regardless of pass/fail.
+# The clone and tarball are left in place for spur-tiny-test.sh (the next stage)
+# to use; spur-tiny-test.sh owns the final cleanup.  On failure, cleans up
+# immediately so no stale state is left behind.
 
 SHA="${1:?usage: $0 <full-sha>}"
 SHORT="${SHA:0:7}"
