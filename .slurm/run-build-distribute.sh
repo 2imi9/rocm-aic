@@ -496,10 +496,19 @@ cmd_build() {
 set -euo pipefail
 command -v docker >/dev/null 2>&1 || { echo 'docker not found on build node' >&2; exit 1; }
 echo "[build] host=\$(hostname) docker=\$(docker --version)"
+# BuildKit writes a temp dir for config injection into TMPDIR (defaults to /tmp).
+# On SPUR compute nodes /tmp may not be writable for this user; use $HOME/tmp instead.
+mkdir -p "\${HOME}/.tmp-rocm-aic-cicd"
+export TMPDIR="\${HOME}/.tmp-rocm-aic-cicd"
 cd "${AIC_DAY_DIR}"
 ${_builder_setup}
 mkdir -p "${AIC_IMAGE_DIR}"
 tmp="${tarball}.partial.\$\$"
+# BuildKit exits non-zero on cache-write lock races even when the image was
+# exported successfully.  Run the pipeline without pipefail so we can inspect
+# each side independently: fail only when the compressor side failed (meaning
+# the tarball itself is corrupt/missing), treat buildx-only failures as warnings.
+set +o pipefail
 docker buildx build --builder ${AIC_BUILDX_BUILDER} --progress=plain --output type=docker,dest=- \
     --build-arg ROCM_ARCH="${AIC_ROCM_ARCH}" \
     ${_secret_arg} \
@@ -507,6 +516,14 @@ docker buildx build --builder ${AIC_BUILDX_BUILDER} --progress=plain --output ty
     -f "${AIC_DAY_DIR}/docker/Dockerfile" \
     -t "${AIC_IMAGE}" \
     "${AIC_DAY_DIR}" | ${COMPRESS_CMD} > "\${tmp}"
+_rc=("\${PIPESTATUS[@]}")
+set -o pipefail
+if [ "\${_rc[1]}" -ne 0 ]; then
+    echo "[build] ERROR: compressor exited \${_rc[1]}; tarball may be corrupt" >&2; exit 1
+fi
+if [ "\${_rc[0]}" -ne 0 ]; then
+    echo "[build] WARN: docker buildx exited \${_rc[0]} (cache lock race?); tarball written, continuing"
+fi
 mv -f "\${tmp}" "${tarball}"
 echo "[build] saved \$(du -h "${tarball}" | cut -f1) -> ${tarball}"
 REMOTE
