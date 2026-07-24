@@ -39,7 +39,8 @@
 #   GPU                    — ROCR_VISIBLE_DEVICES for vllm and lmcache (default: 0)
 #   GDS_MODE               — set to 1 to enable hipFile NVMe slab as L1 (requires GDS_SLAB_DATA)
 #   GDS_SLAB_DATA          — host path for the hipFile slab file (required when GDS_MODE=1)
-#   AIC_L2_BACKEND         — nixl (default AIS_MT + POSIX L2) or local_disk (native LocalDiskBackend)
+#   AIC_L2_BACKEND         — nixl (default AIS_MT + POSIX L2), local_disk (native
+#                            LocalDiskBackend via LMCACHE_CONFIG_FILE), or none (DRAM-only L1)
 #   LMCACHE_CONFIG_FILE_HOST — host path to an LMCache YAML config to mount (advanced; local_disk)
 #   KV_TRANSFER_ARG        — vLLM --kv-transfer-config arg (empty = plain vLLM baseline)
 #   HF_HOME                — host HF cache dir (default: ~/.cache/huggingface)
@@ -82,11 +83,14 @@ services:
         BUILD_JOBS: ${BUILD_JOBS:-}
     image: ${IMAGE_NAME:-rocm-aic}
     container_name: aic-lmcache
-    ports:
-      - "8080:8080"   # lmcache HTTP API + /metrics
-      - "${NIXL_METRICS_PORT:-19090}:${NIXL_METRICS_PORT:-19090}"   # NIXL telemetry /metrics
-    networks:
-      - aic-net
+    # Cross-container HIP IPC (LMCacheMPConnector registering vLLM's KV tensors) on
+    # ROCm requires the two containers to share host networking + host IPC + a PID
+    # namespace.  lmcache owns its (default) PID namespace here; the vllm service
+    # JOINS it via `pid: service:lmcache` (see below) rather than both using host
+    # PID -- host PID makes `docker rm` hang on teardown, container-shared does not.
+    # A bridge network fails IPC (hipErrorInvalidContext); host net is required.
+    # Ports exposed on the host: lmcache 8080, NIXL telemetry ${NIXL_METRICS_PORT:-19090}.
+    network_mode: host
     ipc: host
     cap_add:
       - CAP_SYS_ADMIN
@@ -143,6 +147,9 @@ services:
       - NIXL_TELEMETRY_ENABLE=${NIXL_TELEMETRY_ENABLE-y}
       - NIXL_TELEMETRY_EXPORTER=${NIXL_TELEMETRY_EXPORTER:-prometheus}
       - NIXL_TELEMETRY_PROMETHEUS_PORT=${NIXL_METRICS_PORT:-19090}
+      # Must share the SAME GPU as the vllm service: LMCacheMPConnector registers
+      # vLLM's KV tensors via CUDA IPC, which fails ("invalid device pointer") if
+      # lmcache lands on a different device.  Mirror vllm's ROCR_VISIBLE_DEVICES.
       - ROCR_VISIBLE_DEVICES=${GPU:-0}
       - PYTHONHASHSEED=0
       - TZ=${TZ:-America/Edmonton}
@@ -158,22 +165,26 @@ services:
             --l1-size-gb "$$LMCACHE_L1_SIZE_GB" \
             --eviction-policy LRU \
             --gds-l1-path /data/slab
-        elif [ "$$AIC_L2_BACKEND" = "local_disk" ]; then
-          # Native LocalDiskBackend L2: DRAM L1 (--l1-size-gb) in front of a
-          # .pt-per-chunk disk tier configured via the mounted LMCACHE_CONFIG_FILE.
+        elif [ "$$AIC_L2_BACKEND" = "local_disk" ] || [ "$$AIC_L2_BACKEND" = "none" ]; then
+          # DRAM L1 only on the CLI.  local_disk adds a native LocalDiskBackend L2
+          # via the mounted LMCACHE_CONFIG_FILE; none = pure DRAM (the minimal MP
+          # config -- used by tiny-test and DRAM-only deployments).
           exec lmcache server \
             --host 0.0.0.0 \
             --port "$$LMCACHE_PORT" \
             --l1-size-gb "$$LMCACHE_L1_SIZE_GB" \
             --eviction-policy LRU
         else
+          # nixl AIS_MT NVMe L2a + POSIX NFS L2b.  Both are file-based nixl_store
+          # backends, so both backend_params MUST include use_direct_io (LMCache
+          # rejects the adapter otherwise); POSIX/NFS uses buffered I/O (false).
           exec lmcache server \
             --host 0.0.0.0 \
             --port "$$LMCACHE_PORT" \
             --l1-size-gb "$$LMCACHE_L1_SIZE_GB" \
             --eviction-policy LRU \
-            --l2-adapter "{\"type\":\"nixl_store\",\"backend\":\"AIS_MT\",\"backend_params\":{\"file_path\":\"/data/nvme/lmcache\",\"use_direct_io\":\"$$AIC_NIXL_USE_DIRECT_IO\",\"file_size\":$$LMCACHE_NVME_SLOT_SIZE},\"pool_size\":$$LMCACHE_NVME_POOL}" \
-            --l2-adapter "{\"type\":\"nixl_store\",\"backend\":\"POSIX\",\"backend_params\":{\"file_path\":\"/data/nfs/lmcache\"},\"pool_size\":$$LMCACHE_NFS_POOL}"
+            --l2-adapter "{\"type\":\"nixl_store\",\"backend\":\"AIS_MT\",\"backend_params\":{\"file_path\":\"/data/nvme/lmcache\",\"use_direct_io\":\"$$AIC_NIXL_USE_DIRECT_IO\",\"file_size\":\"$$LMCACHE_NVME_SLOT_SIZE\"},\"pool_size\":$$LMCACHE_NVME_POOL}" \
+            --l2-adapter "{\"type\":\"nixl_store\",\"backend\":\"POSIX\",\"backend_params\":{\"file_path\":\"/data/nfs/lmcache\",\"use_direct_io\":\"false\"},\"pool_size\":$$LMCACHE_NFS_POOL}"
         fi
     healthcheck:
       test:
@@ -192,11 +203,14 @@ services:
   vllm:
     image: ${IMAGE_NAME:-rocm-aic}
     container_name: aic-vllm-gpu${GPU:-0}
-    ports:
-      - "8000:8000"   # vLLM OpenAI API + /metrics
-    networks:
-      - aic-net
+    # host net + host IPC + shared PID ns with lmcache: required for cross-container
+    # HIP IPC KV registration (see the lmcache service).  kvd arms set
+    # VLLM_PID_MODE=service:lmcache so vllm joins lmcache's PID namespace; the plain
+    # vram baseline leaves it empty (vllm runs alone, no lmcache to join).
+    # vLLM OpenAI API + /metrics on host :8000.
+    network_mode: host
     ipc: host
+    pid: "${VLLM_PID_MODE:-}"
     cap_add:
       - CAP_SYS_ADMIN
       - SYS_PTRACE
@@ -227,6 +241,11 @@ services:
       # hybrid model's KV-cache specs.  Harmless for the plain baseline.
       - VLLM_ROCM_USE_AITER=${AIC_ROCM_USE_AITER:-1}
       - PYTORCH_ALLOC_CONF=${PYTORCH_ALLOC_CONF:-expandable_segments:False}
+      # ROCm/HIP reads PYTORCH_HIP_ALLOC_CONF (PYTORCH_ALLOC_CONF is a no-op here).
+      # expandable_segments MUST be off so vLLM's KV tensors can be exported via
+      # HIP IPC to the LMCache MP server -- otherwise register_kv_caches fails with
+      # "invalid device pointer" (hipErrorInvalidDevicePointer) and the engine hangs.
+      - PYTORCH_HIP_ALLOC_CONF=${PYTORCH_HIP_ALLOC_CONF:-expandable_segments:False}
       - PYTHONHASHSEED=0
       - TZ=${TZ:-America/Edmonton}
     command: >
@@ -253,7 +272,3 @@ services:
         # required:false lets the plain baseline run `vllm` alone (lmcache not in
         # the active profile) without a dependency error (needs Compose v2.20+).
         required: false
-
-networks:
-  aic-net:
-    driver: bridge

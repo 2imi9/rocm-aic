@@ -934,6 +934,9 @@ if [ '${_smoke_exporters}' = "1" ]; then
     docker image inspect '${AIC_RDMA_EXPORTER_IMAGE}' >/dev/null 2>&1 && export AIC_RDMA_EXPORTER_IMAGE='${AIC_RDMA_EXPORTER_IMAGE}'
     AIC_IMAGE='${AIC_IMAGE}'
     MON_DIR='${AIC_DAY_DIR}/monitoring'
+    # Compose-only monitoring needs MON_COMPOSE set (the docker-run fallback is
+    # gone); without it start_monitoring skips the whole exporter/Prometheus stack.
+    MON_COMPOSE='${AIC_DAY_DIR}/monitoring/docker-compose.monitoring.yml'
     AIC_METRICS_DIR="\${_logdir}/prometheus"
     AIC_EXPORTERS=1
     AIC_MONITORING=1
@@ -1028,16 +1031,29 @@ export VLM_MAX_NUM_BATCHED_TOKENS=4096
 export VLM_ATTENTION_BACKEND=TRITON_ATTN
 export VLM_KV_CACHE_DTYPE=auto
 export LMCACHE_L1_SIZE_GB=4
-export KV_TRANSFER_ARG="--kv-transfer-config '{\"kv_connector\":\"LMCacheMPConnector\",\"kv_role\":\"kv_both\",\"kv_connector_extra_config\":{\"lmcache.mp.host\":\"tcp://lmcache\",\"lmcache.mp.port\":6555}}'"
+# DRAM-only L1, no L2 tier: the minimal MP config -- robust on a node with only
+# /tmp (AIS_MT/GDS and file-based L2 need a real NVMe/GDS volume). tiny-test only
+# needs to prove the LMCacheMPConnector round-trip + serve works end-to-end.
+export AIC_L2_BACKEND=none
+export VLLM_PID_MODE=service:lmcache
+export KV_TRANSFER_ARG="--kv-transfer-config '{\"kv_connector\":\"LMCacheMPConnector\",\"kv_role\":\"kv_both\",\"kv_connector_extra_config\":{\"lmcache.mp.host\":\"tcp://localhost\",\"lmcache.mp.port\":6555}}'"
 mkdir -p "\${HF_HOME}" /tmp/aic-tiny-nvme /tmp/aic-tiny-nfs
 
 compose() { docker compose -f '${AIC_DAY_DIR}/docker/docker-compose.yml' "\$@"; }
 cleanup() {
-    local svc
+    local svc c
     for svc in vllm lmcache; do
-        compose logs --no-color --no-log-prefix "\$svc" > "\${_logdir}/tiny-\${svc}.log" 2>&1 || true
+        timeout 30 compose logs --no-color --no-log-prefix "\$svc" > "\${_logdir}/tiny-\${svc}.log" 2>&1 || true
     done
-    compose --profile cache down --remove-orphans >/dev/null 2>&1 || true
+    # vLLM shares lmcache's PID ns (for cross-container HIP IPC), which blocks docker
+    # from reaping vLLM's EngineCore children -> compose down/docker rm hang.  Force-
+    # kill the stack first, then tear down (one MP stack per node under host net).
+    pkill -9 -f 'vllm.entrypoints.openai' 2>/dev/null || true
+    pkill -9 -f 'EngineCore'              2>/dev/null || true
+    pkill -9 -f 'lmcache server'          2>/dev/null || true
+    sleep 2
+    timeout 60 compose --profile cache down --remove-orphans --timeout 5 >/dev/null 2>&1 || true
+    for c in aic-vllm-gpu0 aic-lmcache; do timeout 30 docker rm -f "\$c" >/dev/null 2>&1 || true; done
     rm -rf /tmp/aic-tiny-nvme /tmp/aic-tiny-nfs 2>/dev/null || true
 }
 trap cleanup EXIT

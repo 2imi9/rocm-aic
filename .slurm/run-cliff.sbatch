@@ -566,11 +566,22 @@ rm_containers() { docker rm -f "$@" >/dev/null 2>&1 || true; }
 # `compose logs` for a service not started (e.g. lmcache on the vram arm) is a
 # harmless empty capture.  `compose down` removes containers + the bridge network.
 stop_stack() {
-    local svc
+    local svc c
+    # Capture each service's logs before teardown (bounded).
     for svc in vllm lmcache; do
-        compose logs --no-color --no-log-prefix "${svc}" > "${LOGDIR}/container-aic-${svc}.log" 2>&1 || true
+        timeout 30 compose logs --no-color --no-log-prefix "${svc}" > "${LOGDIR}/container-aic-${svc}.log" 2>&1 || true
     done
-    compose --profile cache down --remove-orphans >/dev/null 2>&1 || true
+    # vLLM + lmcache run in a SHARED PID namespace (required for cross-container HIP
+    # IPC KV registration).  That prevents docker from reaping vLLM's EngineCore
+    # children, so a plain `compose down`/`docker rm` HANGS.  Force-kill the stack's
+    # processes first (one MP stack per node under host networking, so scoping by
+    # process name is safe here), then tear the now-empty containers down.
+    pkill -9 -f 'vllm.entrypoints.openai' 2>/dev/null || true
+    pkill -9 -f 'EngineCore'              2>/dev/null || true
+    pkill -9 -f 'lmcache server'          2>/dev/null || true
+    sleep 2
+    timeout 60 compose --profile cache down --remove-orphans --timeout 5 >/dev/null 2>&1 || true
+    for c in aic-vllm-gpu0 aic-lmcache; do timeout 30 docker rm -f "${c}" >/dev/null 2>&1 || true; done
 }
 
 # --- Metrics-capture sidecar (Prometheus + optional exporters) ---------------
@@ -596,6 +607,7 @@ run_arm_vram() {
     log "=== Arm A (vram_only): plain vLLM (no LMCache) on :${VLLM_ENDPOINT_PORT} ==="
     export KV_TRANSFER_ARG=""     # no connector -> plain VRAM-prefix-cache-only vLLM
     export GDS_MODE=""
+    export VLLM_PID_MODE=""       # vllm runs alone; no lmcache PID ns to join
     if ! compose up -d vllm; then
         log "Arm A: compose up vllm failed"; stop_stack; return 1
     fi
@@ -647,7 +659,8 @@ run_arm_kvd() {  # $1=mode(nvme|gds) $2=out_csv
     # MP connector arg for vLLM (+ optional kv_load_failure_policy).  Single-quote
     # the JSON so compose's shlex splitting preserves the inner double quotes.
     local _fp=""; [[ -n "${AIC_KV_LOAD_FAILURE_POLICY}" ]] && _fp=",\"kv_load_failure_policy\":\"${AIC_KV_LOAD_FAILURE_POLICY}\""
-    export KV_TRANSFER_ARG="--kv-transfer-config '{\"kv_connector\":\"LMCacheMPConnector\",\"kv_role\":\"kv_both\"${_fp},\"kv_connector_extra_config\":{\"lmcache.mp.host\":\"tcp://lmcache\",\"lmcache.mp.port\":${LMCACHE_PORT}}}'"
+    export KV_TRANSFER_ARG="--kv-transfer-config '{\"kv_connector\":\"LMCacheMPConnector\",\"kv_role\":\"kv_both\"${_fp},\"kv_connector_extra_config\":{\"lmcache.mp.host\":\"tcp://localhost\",\"lmcache.mp.port\":${LMCACHE_PORT}}}'"
+    export VLLM_PID_MODE=service:lmcache   # share lmcache PID ns for cross-container HIP IPC
 
     local _l2desc
     if [[ "${mode}" == "gds" ]]; then
