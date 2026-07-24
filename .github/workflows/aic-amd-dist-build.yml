@@ -5,6 +5,10 @@ on:
   issue_comment:
     types: [created]
 
+permissions:
+  pull-requests: write
+  statuses: write
+
 jobs:
   # Validate /run-ci slash command on PRs; skipped for manual triggers
   authorize:
