@@ -1,0 +1,181 @@
+# Copyright (c) Advanced Micro Devices, Inc. All rights reserved.
+#
+# SPDX-License-Identifier: MIT
+#
+# Versioned stable release for the AMD Infinity Context (AIC).
+#
+# Triggered by pushing a v* tag (e.g. git tag v1.0.0 && git push origin v1.0.0).
+# Produces a full (non-prerelease) GitHub Release containing:
+#
+#   - LMCache + NIXL ROCm pip wheels (same `wheels` stage as the nightly)
+#   - Source tarball from `make export`
+#   - Full Docker image pushed to Docker Hub as rocm-aic:<tag> and rocm-aic:latest
+#
+# Secrets required:
+#   CORP_CA_CERT      (optional) AMD Zscaler corp CA cert for BuildKit
+#   DOCKERHUB_USERNAME / DOCKERHUB_TOKEN  for Docker Hub push
+#
+name: AIC Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write   # create the versioned GitHub Release
+
+env:
+  IMAGE_NAME: rocm-aic
+  ROCM_ARCH: 'gfx90a;gfx942;gfx950;gfx1100;gfx1101;gfx1150;gfx1151;gfx1200;gfx1201'
+
+jobs:
+  release:
+    name: Build + publish release ${{ github.ref_name }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 420
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # need full history so `make export` can resolve tags
+
+      - name: Free disk space on runner
+        uses: jlumbroso/free-disk-space@v1.3.1
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: true
+
+      - uses: docker/setup-buildx-action@v3
+
+      # Corp CA cert (AMD Zscaler) as a BuildKit secret, only if set.
+      # Never written into any image layer.  Same pattern as aic-docker.yml.
+      - name: Write corp CA cert secret
+        id: cert
+        run: |
+          if [ -n "${{ secrets.CORP_CA_CERT }}" ]; then
+            echo "${{ secrets.CORP_CA_CERT }}" > /tmp/corp-ca.crt
+            echo "path=/tmp/corp-ca.crt" >> "${GITHUB_OUTPUT}"
+            echo "present=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "present=false" >> "${GITHUB_OUTPUT}"
+          fi
+
+      # ---------------------------------------------------------------------------
+      # Build pip wheels
+      # ---------------------------------------------------------------------------
+      - name: Build + extract wheels (target=wheels)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          target: wheels
+          outputs: type=local,dest=wheels
+          build-args: |
+            ROCM_ARCH=${{ env.ROCM_ARCH }}
+          secrets: |
+            ${{ steps.cert.outputs.present == 'true' && format('tls_cert={0}', steps.cert.outputs.path) || '' }}
+          cache-from: type=gha,scope=aic
+          cache-to: type=gha,mode=max,scope=aic
+
+      - name: Verify wheels
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          wheels=(wheels/*.whl)
+          echo "Extracted ${#wheels[@]} wheel(s):"
+          for w in "${wheels[@]}"; do echo "  - $(basename "$w") ($(du -h "$w" | cut -f1))"; done
+          ls wheels/lmcache-*.whl   >/dev/null || { echo "ERROR: no lmcache wheel"   >&2; exit 1; }
+          ls wheels/nixl*rocm*.whl  >/dev/null || { echo "ERROR: no nixl_rocm wheel" >&2; exit 1; }
+
+      # ---------------------------------------------------------------------------
+      # Build source tarball
+      # ---------------------------------------------------------------------------
+      - name: Build source tarball (make export)
+        run: |
+          set -euo pipefail
+          make export
+          tarball="$(ls aic-release-*.tar.gz 2>/dev/null | head -1)"
+          [ -n "${tarball}" ] || { echo "ERROR: make export produced no tarball" >&2; exit 1; }
+          echo "TARBALL=${tarball}" >> "${GITHUB_ENV}"
+          echo "Source tarball: ${tarball} ($(du -h "${tarball}" | cut -f1))"
+
+      # ---------------------------------------------------------------------------
+      # Build + push full Docker image
+      # ---------------------------------------------------------------------------
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build + push Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          push: true
+          tags: |
+            ${{ env.IMAGE_NAME }}:${{ github.ref_name }}
+            ${{ env.IMAGE_NAME }}:latest
+          build-args: |
+            ROCM_ARCH=${{ env.ROCM_ARCH }}
+          secrets: |
+            ${{ steps.cert.outputs.present == 'true' && format('tls_cert={0}', steps.cert.outputs.path) || '' }}
+          cache-from: type=gha,scope=aic
+          cache-to: type=gha,mode=max,scope=aic
+
+      # ---------------------------------------------------------------------------
+      # Compose release notes + publish
+      # ---------------------------------------------------------------------------
+      - name: Compose release notes
+        run: |
+          set -euo pipefail
+          df="docker/Dockerfile"
+          get() { grep -E "^ARG $1=" "$df" | head -1 | cut -d= -f2-; }
+          tag="${{ github.ref_name }}"
+          {
+            echo "Stable release of the **AMD Infinity Context (AIC)** patched stack."
+            echo ""
+            echo "- **Tag:** \`${tag}\`"
+            echo "- **Source SHA:** \`${{ github.sha }}\`"
+            echo "- **GPU arch set:** \`${ROCM_ARCH}\`"
+            echo "- **Base:** rocm/dev-ubuntu-24.04:7.2.4-complete (ROCm 7.2.4, Python 3.12, x86_64)"
+            echo "- **LMCache:** $(get LMCACHE_GIT_URL) @ \`$(get LMCACHE_SHA)\` + AIC patches"
+            echo "- **NIXL:** $(get NIXL_GIT_URL) @ \`$(get NIXL_SHA)\` + nixl-rocm-ais-mt patch"
+            echo ""
+            echo "### Install wheels"
+            echo '```bash'
+            echo "pip install \\"
+            echo "  https://github.com/${GITHUB_REPOSITORY}/releases/download/${tag}/<lmcache-wheel> \\"
+            echo "  https://github.com/${GITHUB_REPOSITORY}/releases/download/${tag}/<nixl_rocm-wheel>"
+            echo '```'
+            echo ""
+            echo "### Docker"
+            echo '```bash'
+            echo "docker pull ${IMAGE_NAME}:${tag}"
+            echo '```'
+            echo ""
+            echo "> These wheels are **not** manylinux: ROCm 7.2.x + Python 3.12 + x86_64 only."
+            echo "> The \`nixl_rocm\` wheel needs the ROCm runtime (libamdhip64) and hipFile"
+            echo "> present on the host; see README.md."
+          } > release-notes.md
+          cat release-notes.md
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="${{ github.ref_name }}"
+          gh release create "${tag}" wheels/*.whl "${TARBALL}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --title "AIC ${tag}" \
+            --notes-file release-notes.md \
+            --target "${{ github.sha }}"
+          echo "Published release ${tag} at ${{ github.sha }}"
