@@ -256,6 +256,7 @@ services:
         --gpu-memory-utilization ${VLM_GPU_MEMORY_UTILIZATION:-0.90}
         --max-model-len ${VLM_MAX_MODEL_LEN:-32768}
         --max-num-batched-tokens ${VLM_MAX_NUM_BATCHED_TOKENS:-4096}
+        --load-format ${VLM_LOAD_FORMAT:-fastsafetensors}
         --block-size 64
         --enable-prefix-caching
         --kv-cache-dtype ${VLM_KV_CACHE_DTYPE:-fp8}
