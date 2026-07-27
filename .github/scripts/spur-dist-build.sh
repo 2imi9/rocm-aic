@@ -39,6 +39,7 @@ cleanup_on_fail() {
 trap cleanup_on_fail ERR
 
 echo "=== Cloning ${REPO} at ${SHA} into ${WORKDIR} ==="
+rm -rf "${WORKDIR}"
 git clone --filter=blob:none "${REPO}" "${WORKDIR}"
 cd "${WORKDIR}"
 git checkout "${SHA}"

@@ -63,6 +63,10 @@
 #           checks GPU visibility + arch, vLLM / LMCache / hipFile, ais-check
 #           (HIP+amdgpu AIS support), and the NIXL AIS_MT plugin (hard fail if
 #           AIS_MT or ais-check fail)
+#   tiny-test  End-to-end serve check on a GPU node: brings up the compose MP
+#           stack (standalone lmcache server + vLLM LMCacheMPConnector) with a tiny
+#           model (Qwen/Qwen2.5-0.5B-Instruct) and asserts one non-empty chat
+#           completion.  Exercises the full connector path a smoke-test cannot.
 #   all     build, build-exporters, then load   (default)
 #
 # Key environment:
@@ -166,6 +170,7 @@ AIC_SPUR_CONTROLLER="${AIC_SPUR_CONTROLLER:-${SPUR_CONTROLLER_ADDR:?set SPUR_CON
 # feature labels; node selection is done by partition or explicit --nodelist).
 if [[ "${AIC_SPUR_CLUSTER}" == "1" ]]; then
     AIC_BUILD_PARTITION="${AIC_BUILD_PARTITION:-amd-spur}"
+    AIC_IMAGE_DIR="${AIC_IMAGE_DIR:-${AIC_SHARED_NFS:-/shared_nfs}/${USER}/images}"
     # Use ${VAR-default} (not ${VAR:-default}) so an explicitly set empty string
     # ("AIC_BUILD_CONSTRAINT=") is honoured as "no constraint".
     AIC_BUILD_CONSTRAINT="${AIC_BUILD_CONSTRAINT-}"
@@ -188,6 +193,18 @@ AIC_CACHE_INSECURE="${AIC_CACHE_INSECURE:-}"
 AIC_TEST_TIME="${AIC_TEST_TIME:-00:45:00}"
 AIC_TEST_CPUS="${AIC_TEST_CPUS:-8}"
 AIC_TEST_MEM="${AIC_TEST_MEM:-32G}"
+
+# --- tiny-test: end-to-end serve check with a tiny model ---------------------
+# Brings up the compose MP stack (standalone lmcache + vLLM LMCacheMPConnector)
+# with a small model and asserts one non-empty chat completion.  A fast functional
+# gate that exercises the connector path a smoke-test cannot.  The model is
+# downloaded once into AIC_TINY_HF_HOME (a persistent shared HF cache) and reused.
+AIC_TINY_MODEL="${AIC_TINY_MODEL:-Qwen/Qwen2.5-0.5B-Instruct}"
+AIC_TINY_HF_HOME="${AIC_TINY_HF_HOME:-${AIC_IMAGE_DIR}/tiny-hf}"
+AIC_TINY_TIME="${AIC_TINY_TIME:-00:25:00}"
+AIC_TINY_CPUS="${AIC_TINY_CPUS:-8}"
+AIC_TINY_MEM="${AIC_TINY_MEM:-32G}"
+AIC_TINY_READY_TIMEOUT="${AIC_TINY_READY_TIMEOUT:-120}"   # x5s = up to 10 min for weights + download
 
 # --- Fabric exporter images (nvme_exporter / rdma_exporter) -------------------
 # Built from monitoring/*/Dockerfile and distributed alongside the main image so
@@ -270,13 +287,20 @@ _sbatch_run() {
     # compute node without relying on SLURM_SUBMIT_DIR.  --output=/dev/null
     # discards any pre-redirect output (there is none here).
     local script
+    # The body runs in a subshell so its own `trap EXIT` cannot clobber the
+    # outer exit-file write.  The outer EXIT trap always fires last and records
+    # the subshell's real exit code regardless of what traps the body set.
     script="$(cat <<PROLOGUE
 #!/bin/bash
 _logdir="${AIC_DAY_DIR}/logs/\${SLURM_JOB_ID:-manual}"
+_exitfile="${AIC_DAY_DIR}/logs/\${SLURM_JOB_ID:-manual}/${logname}.exit"
 mkdir -p "\${_logdir}" 2>/dev/null && exec >>"\${_logdir}/${logname}.out" 2>&1
+( ${body} )
+_body_rc=\$?
+echo "\${_body_rc}" > "\${_exitfile}" 2>/dev/null || true
+exit "\${_body_rc}"
 PROLOGUE
 )"
-    script+=$'\n'"${body}"
 
     local jobid="" logfile="" rc=0
 
@@ -341,10 +365,24 @@ PROLOGUE
         # Read the real exit code from sacct ("<code>:<signal>" format).
         # SPUR sacct ignores -j and returns all jobs; grep for the exact job ID
         # in JobID+ExitCode output to avoid picking up an unrelated row.
-        local acct_exit
-        acct_exit="$(sacct --controller="${AIC_SPUR_CONTROLLER}" -j "${jobid}" \
-            --format=JobID,ExitCode --noheader 2>/dev/null \
-            | awk -v id="${jobid}" '$1==id{split($2,a,":"); print a[1]; exit}')"
+        # Use the exit code written by the job script itself (under the log dir)
+        # as the authoritative source; fall back to sacct only when absent.
+        local acct_exit exit_file="${AIC_DAY_DIR}/logs/${jobid}/${logname}.exit"
+        # Wait up to 10s for the exit file to appear on NFS (it is written by the
+        # job's EXIT trap; NFS open/close may lag a few seconds after job end).
+        local ef_tries=0
+        until [[ -f "${exit_file}" ]] || (( ef_tries >= 10 )); do
+            sleep 1; ef_tries=$((ef_tries + 1))
+        done
+        if [[ -f "${exit_file}" ]]; then
+            acct_exit="$(tr -d '[:space:]' < "${exit_file}" 2>/dev/null)"
+            log "exit code from file: ${acct_exit} (${exit_file})"
+        else
+            acct_exit="$(sacct --controller="${AIC_SPUR_CONTROLLER}" -j "${jobid}" \
+                --format=JobID,ExitCode --noheader 2>/dev/null \
+                | awk -v id="${jobid}" '$1==id{split($2,a,":"); print a[1]; exit}')"
+            log "exit code from sacct: ${acct_exit:-<empty>} (job ${jobid})"
+        fi
         rc="${acct_exit:-1}"
     else
         # Standard Slurm path: --parsable prints the bare job id; --wait blocks
@@ -480,10 +518,24 @@ cmd_build() {
 set -euo pipefail
 command -v docker >/dev/null 2>&1 || { echo 'docker not found on build node' >&2; exit 1; }
 echo "[build] host=\$(hostname) docker=\$(docker --version)"
+# BuildKit writes a temp dir for config injection into TMPDIR (defaults to /tmp).
+# On SPUR compute nodes /tmp may not be writable for this user; use $HOME/tmp instead.
+mkdir -p "\${HOME}/.tmp-rocm-aic-cicd"
+export TMPDIR="\${HOME}/.tmp-rocm-aic-cicd"
 cd "${AIC_DAY_DIR}"
 ${_builder_setup}
 mkdir -p "${AIC_IMAGE_DIR}"
+# Prune the BuildKit cache before building to prevent the builder's local
+# volume from filling the node's disk and silently killing the export.
+echo "[build] pruning BuildKit cache on \$(hostname) before build ..."
+docker buildx prune --builder ${AIC_BUILDX_BUILDER} --force 2>/dev/null || true
+echo "[build] disk after prune: \$(df -h / | awk 'NR==2{print \$3\" free / \"\$2\" total (\"\$5\" used)\"}')"
 tmp="${tarball}.partial.\$\$"
+# BuildKit exits non-zero on cache-write lock races even when the image was
+# exported successfully.  Run the pipeline without pipefail so we can inspect
+# each side independently: fail only when the compressor side failed (meaning
+# the tarball itself is corrupt/missing), treat buildx-only failures as warnings.
+set +o pipefail
 docker buildx build --builder ${AIC_BUILDX_BUILDER} --progress=plain --output type=docker,dest=- \
     --build-arg ROCM_ARCH="${AIC_ROCM_ARCH}" \
     ${_secret_arg} \
@@ -491,8 +543,17 @@ docker buildx build --builder ${AIC_BUILDX_BUILDER} --progress=plain --output ty
     -f "${AIC_DAY_DIR}/docker/Dockerfile" \
     -t "${AIC_IMAGE}" \
     "${AIC_DAY_DIR}" | ${COMPRESS_CMD} > "\${tmp}"
+_rc=("\${PIPESTATUS[@]}")
+set -o pipefail
+if [ "\${_rc[1]}" -ne 0 ]; then
+    echo "[build] ERROR: compressor exited \${_rc[1]}; tarball may be corrupt" >&2; exit 1
+fi
+if [ "\${_rc[0]}" -ne 0 ]; then
+    echo "[build] WARN: docker buildx exited \${_rc[0]} (cache lock race?); tarball written, continuing"
+fi
 mv -f "\${tmp}" "${tarball}"
 echo "[build] saved \$(du -h "${tarball}" | cut -f1) -> ${tarball}"
+exit 0
 REMOTE
 )"
     else
@@ -581,17 +642,36 @@ if ! docker buildx inspect ${AIC_BUILDX_BUILDER} >/dev/null 2>&1; then
 fi
 docker buildx inspect --bootstrap ${AIC_BUILDX_BUILDER} >/dev/null
 tmp="${nvme_tar}.partial.\$\$"
+set +o pipefail
 docker buildx build --builder ${AIC_BUILDX_BUILDER} --output type=docker,dest=- \
     --build-arg NVME_EXPORTER_VERSION="${AIC_NVME_EXPORTER_VERSION}" \
     -t "${AIC_NVME_EXPORTER_IMAGE}" "${AIC_DAY_DIR}/monitoring/nvme-exporter" | ${COMPRESS_CMD} > "\${tmp}"
+_rc=("\${PIPESTATUS[@]}")
+set -o pipefail
+if [ "\${_rc[1]}" -ne 0 ]; then
+    echo "[build-exporters] ERROR: compressor exited \${_rc[1]} for nvme image; tarball may be corrupt" >&2; exit 1
+fi
+if [ "\${_rc[0]}" -ne 0 ]; then
+    echo "[build-exporters] WARN: docker buildx exited \${_rc[0]} for nvme image (cache lock race?); tarball written, continuing"
+fi
 mv -f "\${tmp}" "${nvme_tar}"
 tmp="${rdma_tar}.partial.\$\$"
+set +o pipefail
 docker buildx build --builder ${AIC_BUILDX_BUILDER} --output type=docker,dest=- \
     --build-arg RDMA_EXPORTER_VERSION="${AIC_RDMA_EXPORTER_VERSION}" \
     -t "${AIC_RDMA_EXPORTER_IMAGE}" "${AIC_DAY_DIR}/monitoring/rdma-exporter" | ${COMPRESS_CMD} > "\${tmp}"
+_rc=("\${PIPESTATUS[@]}")
+set -o pipefail
+if [ "\${_rc[1]}" -ne 0 ]; then
+    echo "[build-exporters] ERROR: compressor exited \${_rc[1]} for rdma image; tarball may be corrupt" >&2; exit 1
+fi
+if [ "\${_rc[0]}" -ne 0 ]; then
+    echo "[build-exporters] WARN: docker buildx exited \${_rc[0]} for rdma image (cache lock race?); tarball written, continuing"
+fi
 mv -f "\${tmp}" "${rdma_tar}"
 echo "[build-exporters] saved \$(du -h "${nvme_tar}" | cut -f1) -> ${nvme_tar}"
 echo "[build-exporters] saved \$(du -h "${rdma_tar}" | cut -f1) -> ${rdma_tar}"
+exit 0
 REMOTE
 )"
 
@@ -918,6 +998,9 @@ if [ '${_smoke_exporters}' = "1" ]; then
     docker image inspect '${AIC_RDMA_EXPORTER_IMAGE}' >/dev/null 2>&1 && export AIC_RDMA_EXPORTER_IMAGE='${AIC_RDMA_EXPORTER_IMAGE}'
     AIC_IMAGE='${AIC_IMAGE}'
     MON_DIR='${AIC_DAY_DIR}/monitoring'
+    # Compose-only monitoring needs MON_COMPOSE set (the docker-run fallback is
+    # gone); without it start_monitoring skips the whole exporter/Prometheus stack.
+    MON_COMPOSE='${AIC_DAY_DIR}/monitoring/docker-compose.monitoring.yml'
     AIC_METRICS_DIR="\${_logdir}/prometheus"
     AIC_EXPORTERS=1
     AIC_MONITORING=1
@@ -948,6 +1031,144 @@ REMOTE
     log "test complete"
 }
 
+# --- tiny-test: end-to-end serve check (compose MP stack + a tiny model) ------
+# Loads the image on a GPU node if needed, brings up the SAME compose stack the
+# cliff/`make up` use (standalone lmcache server + vLLM LMCacheMPConnector), waits
+# for the endpoint, and asserts one non-empty chat completion.  Unlike smoke-test
+# (which validates the image in isolation) this exercises the full MP connector
+# path end-to-end -- the functional gate wired into CI after smoke-test.
+cmd_tiny_test() {
+    _pick_compress
+    local tarball; tarball="$(_tarball_path)"
+    command -v sbatch >/dev/null 2>&1 || die "sbatch not found; cannot run the GPU tiny-test job"
+    [[ -r "${tarball}" ]] || die "tarball not found: ${tarball} (run 'build' first)"
+
+    local -a _sel
+    if [[ -n "${AIC_TEST_NODE:-}" ]]; then
+        _sel=(--nodelist="${AIC_TEST_NODE}")
+        log "tiny-test on ${AIC_TEST_NODE} via sbatch (partition ${AIC_BUILD_PARTITION})"
+    else
+        _sel=(--constraint="${AIC_TEST_CONSTRAINT}")
+        log "tiny-test via sbatch (partition ${AIC_BUILD_PARTITION}, constraint ${AIC_TEST_CONSTRAINT})"
+    fi
+    log "image: ${AIC_IMAGE}  model: ${AIC_TINY_MODEL}  hf: ${AIC_TINY_HF_HOME}"
+
+    local remote_script
+    remote_script="$(cat <<REMOTE
+set -uo pipefail
+command -v docker >/dev/null 2>&1 || { echo "\$(hostname): docker not found" >&2; exit 1; }
+echo "[tiny-test] host=\$(hostname) docker=\$(docker --version)"
+
+# Load the image from the shared tarball only when needed (same marker logic as
+# smoke-test): reload when forced, absent, or the tarball is newer.
+_marker="/var/tmp/aic-loaded-\$(id -u)-\$(echo '${AIC_IMAGE}' | tr '/:' '__').mtime"
+_tar_mtime="\$(stat -c %Y '${tarball}' 2>/dev/null || echo 0)"
+_have_img="\$(docker images -q '${AIC_IMAGE}')"
+_loaded_mtime="\$(cat "\${_marker}" 2>/dev/null || echo 0)"
+if [ "${AIC_FORCE_LOAD:-0}" = "1" ] || [ -z "\${_have_img}" ] || [ "\${_tar_mtime}" -gt "\${_loaded_mtime}" ]; then
+    echo "[tiny-test] loading ${AIC_IMAGE} from ${tarball}"
+    ${DECOMPRESS_CMD} '${tarball}' | docker load >/dev/null
+    echo "\${_tar_mtime}" > "\${_marker}" 2>/dev/null || true
+else
+    echo "[tiny-test] image up to date on \$(hostname) (id \${_have_img})"
+fi
+
+cd '${AIC_DAY_DIR}'
+# docker compose v2 only -- install user-locally if the node lacks the plugin.
+# shellcheck source=/dev/null
+source '${AIC_DAY_DIR}/monitoring/monitoring-lib.sh'
+ensure_compose || { echo "[tiny-test] docker compose unavailable and could not be installed" >&2; exit 1; }
+
+# Tiny-model MP stack env.  Small footprint; the tiny model is downloaded online
+# into the persistent AIC_TINY_HF_HOME (Qwen2.5-0.5B is ungated -- no HF token).
+export IMAGE_NAME='${AIC_IMAGE}'
+export ROCM_ARCH='${AIC_ROCM_ARCH}'
+export GPU=0
+export VLLM_MODEL='${AIC_TINY_MODEL}'
+export HF_HOME='${AIC_TINY_HF_HOME}'
+export HF_HUB_OFFLINE=0 TRANSFORMERS_OFFLINE=0
+export LOG="\${_logdir}"
+export NVME_DATA=/tmp/aic-tiny-nvme NFS_DATA=/tmp/aic-tiny-nfs
+export VLM_GPU_MEMORY_UTILIZATION=0.30
+export VLM_MAX_MODEL_LEN=4096
+export VLM_MAX_NUM_BATCHED_TOKENS=4096
+export VLM_ATTENTION_BACKEND=TRITON_ATTN
+export VLM_KV_CACHE_DTYPE=auto
+export LMCACHE_L1_SIZE_GB=4
+# DRAM-only L1, no L2 tier: the minimal MP config -- robust on a node with only
+# /tmp (AIS_MT/GDS and file-based L2 need a real NVMe/GDS volume). tiny-test only
+# needs to prove the LMCacheMPConnector round-trip + serve works end-to-end.
+export AIC_L2_BACKEND=none
+export VLLM_PID_MODE=service:lmcache
+export KV_TRANSFER_ARG="--kv-transfer-config '{\"kv_connector\":\"LMCacheMPConnector\",\"kv_role\":\"kv_both\",\"kv_connector_extra_config\":{\"lmcache.mp.host\":\"tcp://localhost\",\"lmcache.mp.port\":6555}}'"
+mkdir -p "\${HF_HOME}" /tmp/aic-tiny-nvme /tmp/aic-tiny-nfs
+
+compose() { docker compose -f '${AIC_DAY_DIR}/docker/docker-compose.yml' "\$@"; }
+cleanup() {
+    local svc c
+    for svc in vllm lmcache; do
+        timeout 30 compose logs --no-color --no-log-prefix "\$svc" > "\${_logdir}/tiny-\${svc}.log" 2>&1 || true
+    done
+    # vLLM shares lmcache's PID ns (for cross-container HIP IPC), which blocks docker
+    # from reaping vLLM's EngineCore children -> compose down/docker rm hang.  Force-
+    # kill the stack first, then tear down (one MP stack per node under host net).
+    pkill -9 -f 'vllm.entrypoints.openai' 2>/dev/null || true
+    pkill -9 -f 'EngineCore'              2>/dev/null || true
+    pkill -9 -f 'lmcache server'          2>/dev/null || true
+    sleep 2
+    timeout 60 compose --profile cache down --remove-orphans --timeout 5 >/dev/null 2>&1 || true
+    for c in aic-vllm-gpu0 aic-lmcache; do timeout 30 docker rm -f "\$c" >/dev/null 2>&1 || true; done
+    rm -rf /tmp/aic-tiny-nvme /tmp/aic-tiny-nfs 2>/dev/null || true
+}
+trap cleanup EXIT
+
+echo "[tiny-test] bringing up compose MP stack (model=${AIC_TINY_MODEL}) ..."
+if ! compose --profile cache up -d; then
+    echo "[tiny-test] FAIL: compose up failed" >&2
+    compose logs --tail 60 --no-color lmcache 2>&1 | sed 's/^/  [lmcache] /'
+    compose logs --tail 60 --no-color vllm    2>&1 | sed 's/^/  [vllm]    /'
+    exit 1
+fi
+
+# Wait for the vLLM endpoint (weights load + one-time model download).
+ready=0
+for _i in \$(seq 1 ${AIC_TINY_READY_TIMEOUT}); do
+    if curl -fsS http://localhost:8000/v1/models >/dev/null 2>&1; then ready=1; break; fi
+    sleep 5
+done
+if [ "\${ready}" != "1" ]; then
+    echo "[tiny-test] FAIL: vLLM never became ready" >&2
+    compose logs --tail 80 --no-color vllm 2>&1 | sed 's/^/  [vllm] /'
+    exit 1
+fi
+echo "[tiny-test] endpoint ready; sending one chat completion ..."
+
+# One real completion; assert a NON-EMPTY assistant content came back through the
+# LMCacheMPConnector path.
+resp="\$(curl -fsS http://localhost:8000/v1/chat/completions \
+    -H 'Content-Type: application/json' \
+    -d '{"model":"${AIC_TINY_MODEL}","messages":[{"role":"user","content":"Reply with the single word: pong"}],"max_tokens":16,"temperature":0}' 2>&1)" || {
+    echo "[tiny-test] FAIL: completion request failed: \${resp}" >&2; exit 1; }
+echo "[tiny-test] response: \${resp}"
+if printf '%s' "\${resp}" | grep -qE '"content"[[:space:]]*:[[:space:]]*"[^"]+'; then
+    echo "[tiny-test] OK: got a non-empty completion via LMCacheMPConnector"
+    exit 0
+fi
+echo "[tiny-test] FAIL: empty or missing completion content" >&2
+exit 1
+REMOTE
+)"
+
+    local -a _gres_arg=(); [[ "${AIC_SPUR_CLUSTER}" != "1" ]] && _gres_arg=(--gres=gpu:1)
+    _sbatch_run aic-tiny-test tiny-test "${remote_script}" \
+        "${_sel[@]}" \
+        "${_gres_arg[@]}" \
+        --nodes=1 --ntasks=1 \
+        --cpus-per-task="${AIC_TINY_CPUS}" --mem="${AIC_TINY_MEM}" \
+        --time="${AIC_TINY_TIME}"
+    log "tiny-test complete"
+}
+
 # --- main --------------------------------------------------------------------
 main() {
     local sub="${1:-all}"
@@ -957,11 +1178,12 @@ main() {
         load)            cmd_load ;;
         push)            cmd_push ;;
         test)            cmd_test ;;
+        tiny-test)       cmd_tiny_test ;;
         all)             cmd_build; cmd_build_exporters; cmd_load ;;
         -h|--help|help)
             sed -n '2,70p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
             ;;
-        *) die "unknown command '${sub}' (use: build | build-exporters | load | push | test | all | help)" ;;
+        *) die "unknown command '${sub}' (use: build | build-exporters | load | push | test | tiny-test | all | help)" ;;
     esac
 }
 
