@@ -287,14 +287,20 @@ _sbatch_run() {
     # compute node without relying on SLURM_SUBMIT_DIR.  --output=/dev/null
     # discards any pre-redirect output (there is none here).
     local script
+    # The body runs in a subshell so its own `trap EXIT` cannot clobber the
+    # outer exit-file write.  The outer EXIT trap always fires last and records
+    # the subshell's real exit code regardless of what traps the body set.
     script="$(cat <<PROLOGUE
 #!/bin/bash
 _logdir="${AIC_DAY_DIR}/logs/\${SLURM_JOB_ID:-manual}"
+_exitfile="${AIC_DAY_DIR}/logs/\${SLURM_JOB_ID:-manual}/${logname}.exit"
 mkdir -p "\${_logdir}" 2>/dev/null && exec >>"\${_logdir}/${logname}.out" 2>&1
-trap '_exit_rc=\$?; echo "\${_exit_rc}" > "${AIC_DAY_DIR}/logs/\${SLURM_JOB_ID:-manual}/${logname}.exit" 2>/dev/null || true' EXIT
+( ${body} )
+_body_rc=\$?
+echo "\${_body_rc}" > "\${_exitfile}" 2>/dev/null || true
+exit "\${_body_rc}"
 PROLOGUE
 )"
-    script+=$'\n'"${body}"
 
     local jobid="" logfile="" rc=0
 
