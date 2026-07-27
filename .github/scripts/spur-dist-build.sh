@@ -10,7 +10,7 @@ set -euo pipefail
 
 SHA="${1:?usage: $0 <full-sha>}"
 SHORT="${SHA:0:7}"
-REPO="git@github.com:ROCm/rocm-aic.git"
+REPO="https://github.com/ROCm/rocm-aic.git"
 AIC_IMAGE="rocm-aic-ci-${SHORT}:latest"
 AIC_SPUR_HOST="${AIC_SPUR_HOST:?AIC_SPUR_HOST must be set (e.g. via GitHub repo variable)}"
 AIC_SPUR_HOST="${AIC_SPUR_HOST//[$'\t\r\n ']}"
