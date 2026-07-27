@@ -170,6 +170,7 @@ AIC_SPUR_CONTROLLER="${AIC_SPUR_CONTROLLER:-${SPUR_CONTROLLER_ADDR:?set SPUR_CON
 # feature labels; node selection is done by partition or explicit --nodelist).
 if [[ "${AIC_SPUR_CLUSTER}" == "1" ]]; then
     AIC_BUILD_PARTITION="${AIC_BUILD_PARTITION:-amd-spur}"
+    AIC_IMAGE_DIR="${AIC_IMAGE_DIR:-${AIC_SHARED_NFS:-/shared_nfs}/${USER}/images}"
     # Use ${VAR-default} (not ${VAR:-default}) so an explicitly set empty string
     # ("AIC_BUILD_CONSTRAINT=") is honoured as "no constraint".
     AIC_BUILD_CONSTRAINT="${AIC_BUILD_CONSTRAINT-}"
@@ -290,6 +291,7 @@ _sbatch_run() {
 #!/bin/bash
 _logdir="${AIC_DAY_DIR}/logs/\${SLURM_JOB_ID:-manual}"
 mkdir -p "\${_logdir}" 2>/dev/null && exec >>"\${_logdir}/${logname}.out" 2>&1
+trap '_exit_rc=\$?; echo "\${_exit_rc}" > "${AIC_DAY_DIR}/logs/\${SLURM_JOB_ID:-manual}/${logname}.exit" 2>/dev/null || true' EXIT
 PROLOGUE
 )"
     script+=$'\n'"${body}"
@@ -357,10 +359,18 @@ PROLOGUE
         # Read the real exit code from sacct ("<code>:<signal>" format).
         # SPUR sacct ignores -j and returns all jobs; grep for the exact job ID
         # in JobID+ExitCode output to avoid picking up an unrelated row.
-        local acct_exit
-        acct_exit="$(sacct --controller="${AIC_SPUR_CONTROLLER}" -j "${jobid}" \
-            --format=JobID,ExitCode --noheader 2>/dev/null \
-            | awk -v id="${jobid}" '$1==id{split($2,a,":"); print a[1]; exit}')"
+        # Use the exit code written by the job script itself (under the log dir)
+        # as the authoritative source; fall back to sacct only when absent.
+        local acct_exit exit_file="${AIC_DAY_DIR}/logs/${jobid}/${logname}.exit"
+        if [[ -f "${exit_file}" ]]; then
+            acct_exit="$(cat "${exit_file}" 2>/dev/null | tr -d '[:space:]')"
+            log "exit code from file: ${acct_exit} (${exit_file})"
+        else
+            acct_exit="$(sacct --controller="${AIC_SPUR_CONTROLLER}" -j "${jobid}" \
+                --format=JobID,ExitCode --noheader 2>/dev/null \
+                | awk -v id="${jobid}" '$1==id{split($2,a,":"); print a[1]; exit}')"
+            log "exit code from sacct: ${acct_exit:-<empty>} (job ${jobid})"
+        fi
         rc="${acct_exit:-1}"
     else
         # Standard Slurm path: --parsable prints the bare job id; --wait blocks
@@ -526,6 +536,7 @@ if [ "\${_rc[0]}" -ne 0 ]; then
 fi
 mv -f "\${tmp}" "${tarball}"
 echo "[build] saved \$(du -h "${tarball}" | cut -f1) -> ${tarball}"
+exit 0
 REMOTE
 )"
     else
@@ -614,17 +625,36 @@ if ! docker buildx inspect ${AIC_BUILDX_BUILDER} >/dev/null 2>&1; then
 fi
 docker buildx inspect --bootstrap ${AIC_BUILDX_BUILDER} >/dev/null
 tmp="${nvme_tar}.partial.\$\$"
+set +o pipefail
 docker buildx build --builder ${AIC_BUILDX_BUILDER} --output type=docker,dest=- \
     --build-arg NVME_EXPORTER_VERSION="${AIC_NVME_EXPORTER_VERSION}" \
     -t "${AIC_NVME_EXPORTER_IMAGE}" "${AIC_DAY_DIR}/monitoring/nvme-exporter" | ${COMPRESS_CMD} > "\${tmp}"
+_rc=("\${PIPESTATUS[@]}")
+set -o pipefail
+if [ "\${_rc[1]}" -ne 0 ]; then
+    echo "[build-exporters] ERROR: compressor exited \${_rc[1]} for nvme image; tarball may be corrupt" >&2; exit 1
+fi
+if [ "\${_rc[0]}" -ne 0 ]; then
+    echo "[build-exporters] WARN: docker buildx exited \${_rc[0]} for nvme image (cache lock race?); tarball written, continuing"
+fi
 mv -f "\${tmp}" "${nvme_tar}"
 tmp="${rdma_tar}.partial.\$\$"
+set +o pipefail
 docker buildx build --builder ${AIC_BUILDX_BUILDER} --output type=docker,dest=- \
     --build-arg RDMA_EXPORTER_VERSION="${AIC_RDMA_EXPORTER_VERSION}" \
     -t "${AIC_RDMA_EXPORTER_IMAGE}" "${AIC_DAY_DIR}/monitoring/rdma-exporter" | ${COMPRESS_CMD} > "\${tmp}"
+_rc=("\${PIPESTATUS[@]}")
+set -o pipefail
+if [ "\${_rc[1]}" -ne 0 ]; then
+    echo "[build-exporters] ERROR: compressor exited \${_rc[1]} for rdma image; tarball may be corrupt" >&2; exit 1
+fi
+if [ "\${_rc[0]}" -ne 0 ]; then
+    echo "[build-exporters] WARN: docker buildx exited \${_rc[0]} for rdma image (cache lock race?); tarball written, continuing"
+fi
 mv -f "\${tmp}" "${rdma_tar}"
 echo "[build-exporters] saved \$(du -h "${nvme_tar}" | cut -f1) -> ${nvme_tar}"
 echo "[build-exporters] saved \$(du -h "${rdma_tar}" | cut -f1) -> ${rdma_tar}"
+exit 0
 REMOTE
 )"
 
