@@ -513,6 +513,11 @@ export TMPDIR="\${HOME}/.tmp-rocm-aic-cicd"
 cd "${AIC_DAY_DIR}"
 ${_builder_setup}
 mkdir -p "${AIC_IMAGE_DIR}"
+# Prune the BuildKit cache before building to prevent the builder's local
+# volume from filling the node's disk and silently killing the export.
+echo "[build] pruning BuildKit cache on \$(hostname) before build ..."
+docker buildx prune --builder ${AIC_BUILDX_BUILDER} --force 2>/dev/null || true
+echo "[build] disk after prune: \$(df -h / | awk 'NR==2{print \$3\" free / \"\$2\" total (\"\$5\" used)\"}')"
 tmp="${tarball}.partial.\$\$"
 # BuildKit exits non-zero on cache-write lock races even when the image was
 # exported successfully.  Run the pipeline without pipefail so we can inspect
