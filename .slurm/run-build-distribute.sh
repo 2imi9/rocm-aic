@@ -362,8 +362,14 @@ PROLOGUE
         # Use the exit code written by the job script itself (under the log dir)
         # as the authoritative source; fall back to sacct only when absent.
         local acct_exit exit_file="${AIC_DAY_DIR}/logs/${jobid}/${logname}.exit"
+        # Wait up to 10s for the exit file to appear on NFS (it is written by the
+        # job's EXIT trap; NFS open/close may lag a few seconds after job end).
+        local ef_tries=0
+        until [[ -f "${exit_file}" ]] || (( ef_tries >= 10 )); do
+            sleep 1; ef_tries=$((ef_tries + 1))
+        done
         if [[ -f "${exit_file}" ]]; then
-            acct_exit="$(cat "${exit_file}" 2>/dev/null | tr -d '[:space:]')"
+            acct_exit="$(tr -d '[:space:]' < "${exit_file}" 2>/dev/null)"
             log "exit code from file: ${acct_exit} (${exit_file})"
         else
             acct_exit="$(sacct --controller="${AIC_SPUR_CONTROLLER}" -j "${jobid}" \
