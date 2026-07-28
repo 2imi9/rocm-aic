@@ -76,9 +76,9 @@ try:
     _emulator = LLMEmulator(model=MODEL, emulate_latency=True)
     log.info("LLMEmulator loaded for model %s", MODEL)
 except Exception as exc:  # pragma: no cover  # emulator may not exist in all builds
-    log.warning("LLMEmulator unavailable (%s); falling back to vllm.LLM --device cpu", exc)
+    log.warning("LLMEmulator unavailable (%s); falling back to vllm.LLM runner=cpu", exc)
     from vllm import LLM, SamplingParams as _SP  # type: ignore[import]
-    _emulator = LLM(model=MODEL, device="cpu")
+    _emulator = LLM(model=MODEL, runner="cpu")
 
 # ---------------------------------------------------------------------------
 # FastAPI application

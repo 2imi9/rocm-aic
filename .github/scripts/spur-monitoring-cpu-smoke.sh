@@ -175,12 +175,13 @@ docker run -d --name aic-prometheus \
 # ---------------------------------------------------------------------------
 echo "=== Starting vLLM emulator (8000) ==="
 docker run -d --name aic-vllm-emulator \
+    --entrypoint python3 \
     --network host \
     -v "${WORKDIR}/monitoring/scripts/vllm_emulator_server.py:/app/vllm_emulator_server.py:ro" \
     -e VLLM_MODEL="${VLLM_CPU_MODEL:-facebook/opt-125m}" \
     -e PYTHONUNBUFFERED=1 \
     "${AIC_IMAGE}" \
-    python3 /app/vllm_emulator_server.py
+    /app/vllm_emulator_server.py
 
 # ---------------------------------------------------------------------------
 # 4. Wait for vLLM emulator to be healthy (up to 3 min)
