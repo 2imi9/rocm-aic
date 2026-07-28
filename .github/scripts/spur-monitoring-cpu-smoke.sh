@@ -61,19 +61,6 @@ cd "${WORKDIR}"
 git checkout "${SHA}"
 
 # ---------------------------------------------------------------------------
-# Load or pull the rocm-aic image
-# ---------------------------------------------------------------------------
-if [[ "${AIC_SMOKE_USE_REGISTRY}" == "1" ]]; then
-    docker pull "${AIC_IMAGE}"
-else
-    echo "=== Loading image from ${TARBALL_DIR} ==="
-    docker load -i "${TARBALL_DIR}/rocm-aic.tar"
-    docker tag rocm-aic:latest "${AIC_IMAGE}"
-fi
-
-export IMAGE_NAME="${AIC_IMAGE}"
-
-# ---------------------------------------------------------------------------
 # Submit a CPU-only srun job
 # ---------------------------------------------------------------------------
 SRUN_SCRIPT="$(mktemp /tmp/aic-cpu-smoke-XXXXXX.sh)"
@@ -87,7 +74,20 @@ WORKDIR="${1}"
 AIC_IMAGE="${2}"
 METRICS_PAGE_DIR="${3}"
 SHA="${4}"
+TARBALL_DIR="${5}"
+AIC_SMOKE_USE_REGISTRY="${6:-0}"
 SHORT="${SHA:0:7}"
+
+# ---------------------------------------------------------------------------
+# Load or pull the rocm-aic image (docker is on the compute node, not the head node)
+# ---------------------------------------------------------------------------
+if [[ "${AIC_SMOKE_USE_REGISTRY}" == "1" ]]; then
+    docker pull "${AIC_IMAGE}"
+else
+    echo "=== Loading image from ${TARBALL_DIR} ==="
+    docker load -i "${TARBALL_DIR}/rocm-aic.tar"
+    docker tag rocm-aic:latest "${AIC_IMAGE}"
+fi
 
 MON_DIR="${WORKDIR}/monitoring"
 METRICS_DIR="/tmp/aic-prom-tsdb-${SHORT}"
@@ -287,7 +287,9 @@ srun \
         "${WORKDIR}" \
         "${AIC_IMAGE}" \
         "${METRICS_PAGE_DIR}" \
-        "${SHA}"
+        "${SHA}" \
+        "${TARBALL_DIR}" \
+        "${AIC_SMOKE_USE_REGISTRY}"
 
 echo "=== srun job completed ==="
 REMOTE
