@@ -60,9 +60,9 @@ RUN test -n "$ROCM_ARCH" || (echo "ERROR: ROCM_ARCH is not set" && exit 1)
 ARG BUILD_JOBS=
 
 # vLLM wheel version on wheels.vllm.ai.  rocm723 = ROCm 7.2.3, Python 3.12 --
-# the only ROCm variant published for 0.26.0 (ABI-compatible with the 7.2.4 base).
+# pinned to 0.25.0 until the 0.26.0+rocm723 wheel is published on wheels.vllm.ai.
 # Check https://wheels.vllm.ai/rocm/<version>/ for the variant tag on version bumps.
-ARG VLLM_VERSION=0.26.0
+ARG VLLM_VERSION=0.25.0
 ARG VLLM_ROCM_VARIANT=rocm723
 
 # Pinned component revisions — bump together when validating a new combo.
