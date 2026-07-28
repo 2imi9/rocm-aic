@@ -162,6 +162,7 @@ AIC_DAY_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 # Infinity-Storage hardware -- if hipFile fails to build for them, narrow this
 # to the CDNA set "gfx90a;gfx942;gfx950".  Override via AIC_ROCM_ARCH.
 AIC_ROCM_ARCH="${AIC_ROCM_ARCH:-gfx90a;gfx942;gfx950;gfx1100;gfx1101;gfx1150;gfx1151;gfx1200;gfx1201}"
+AIC_UCX_FAST="${AIC_UCX_FAST:-}"
 AIC_IMAGE="${AIC_IMAGE:-rocm-aic:latest}"
 AIC_IMAGE_DIR="${AIC_IMAGE_DIR:-/scratch/${USER}/images}"
 AIC_SPUR_CLUSTER="${AIC_SPUR_CLUSTER:-0}"
@@ -535,6 +536,7 @@ echo "[build] disk after prune: \$(df -h / | awk 'NR==2{print \$3\" free / \"\$2
 tmp="${tarball}.partial.\$\$"
 docker buildx build --builder ${AIC_BUILDX_BUILDER} --progress=plain --output type=docker,dest=- \
     --build-arg ROCM_ARCH="${AIC_ROCM_ARCH}" \
+    --build-arg AIC_UCX_FAST="${AIC_UCX_FAST}" \
     ${_secret_arg} \
     ${_cache_args} \
     -f "${AIC_DAY_DIR}/docker/Dockerfile" \
@@ -556,6 +558,7 @@ cd "${AIC_DAY_DIR}"
 ${_builder_setup}
 ${_build_program} \
     --build-arg ROCM_ARCH="${AIC_ROCM_ARCH}" \
+    --build-arg AIC_UCX_FAST="${AIC_UCX_FAST}" \
     ${_secret_arg} \
     ${_cache_args} \
     -f "${AIC_DAY_DIR}/docker/Dockerfile" \

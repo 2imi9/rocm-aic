@@ -268,6 +268,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # ----- 6. NIXL (ai-dynamo/nixl upstream + nixl-rocm-ais-mt.patch) ------------
 # Clone upstream ai-dynamo/nixl, then apply nixl-rocm-ais-mt.patch to add ROCm/HIP
 # detection and the AIS_MT plugin tree.
+ARG AIC_UCX_FAST=
 COPY docker/scripts /tmp/nixl-scripts
 COPY patches/nixl/ /tmp/nixl-patches/
 # Apply every patch under patches/nixl/ (lexical order) to the fresh checkout.
@@ -292,6 +293,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         NIXL_INSTALL_PREFIX=/opt/nixl \
         NIXL_BUILD_WHEEL=1 NIXL_WHEEL_DIR=/wheels \
         BUILD_JOBS="${BUILD_JOBS}" \
+        AIC_UCX_FAST="${AIC_UCX_FAST}" \
         UV_SYSTEM_CERTS=1 \
         /tmp/nixl-scripts/build-nixl.sh
 
