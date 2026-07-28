@@ -54,6 +54,7 @@ if [[ ! -d "${WORKDIR}" ]]; then
         git@github.com:ROCm/rocm-aic.git "${WORKDIR}"
 fi
 cd "${WORKDIR}"
+git fetch origin "${SHA}"
 git checkout "${SHA}"
 
 # ---------------------------------------------------------------------------

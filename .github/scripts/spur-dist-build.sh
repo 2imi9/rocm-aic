@@ -42,6 +42,7 @@ echo "=== Cloning ${REPO} at ${SHA} into ${WORKDIR} ==="
 rm -rf "${WORKDIR}"
 git clone --filter=blob:none "${REPO}" "${WORKDIR}"
 cd "${WORKDIR}"
+git fetch origin "${SHA}"
 git checkout "${SHA}"
 
 mkdir -p "${TARBALL_DIR}"

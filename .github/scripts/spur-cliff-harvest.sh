@@ -62,10 +62,11 @@ trap cleanup EXIT
 # ---------------------------------------------------------------------------
 if [[ ! -d "${WORKDIR}" ]]; then
     echo "=== Cloning rocm-aic at ${SHA} ==="
-    git clone git@github.com:ROCm/rocm-aic.git "${WORKDIR}"
+    git clone --filter=blob:none git@github.com:ROCm/rocm-aic.git "${WORKDIR}"
 fi
 cd "${WORKDIR}"
-git -C "${WORKDIR}" checkout --quiet "${SHA}"
+git fetch origin "${SHA}"
+git checkout --quiet "${SHA}"
 
 if [[ ! -d "${TARBALL_DIR}" ]]; then
     echo "ERROR: ${TARBALL_DIR} not found — did dist-build run first?" >&2
