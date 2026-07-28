@@ -33,16 +33,13 @@ AIC_SPUR_HOST="${AIC_SPUR_HOST//[$'\t\r\n ']}"
 AIC_SHARED_NFS="${AIC_SHARED_NFS:?AIC_SHARED_NFS must be set (e.g. via GitHub repo variable)}"
 AIC_SPUR_CONTROLLER="${AIC_SPUR_CONTROLLER:?AIC_SPUR_CONTROLLER must be set (e.g. via GitHub repo variable)}"
 REPO="https://github.com/ROCm/rocm-aic.git"
-TARBALL_DIR="${AIC_SHARED_NFS}/\${USER}/images/aic-ci-${SHORT}"
-CLIFF_STAGING_DIR="${AIC_SHARED_NFS}/\${USER}/cliff-results-${SHORT}"
 
 ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=4 "${AIC_SPUR_HOST}" env \
     SHA="${SHA}" \
     REPO="${REPO}" \
     RUN_DATE="${RUN_DATE}" \
     AIC_IMAGE="${AIC_IMAGE}" \
-    TARBALL_DIR="${TARBALL_DIR}" \
-    CLIFF_STAGING_DIR="${CLIFF_STAGING_DIR}" \
+    AIC_SHARED_NFS="${AIC_SHARED_NFS}" \
     AIC_SPUR_CONTROLLER="${AIC_SPUR_CONTROLLER}" \
     SPUR_CONTROLLER_ADDR="${AIC_SPUR_CONTROLLER}" \
     bash << 'REMOTE'
@@ -50,6 +47,9 @@ set -euo pipefail
 
 SHORT="${SHA:0:7}"
 WORKDIR="$HOME/Projects/rocm-aic.${SHORT}"
+# $USER here is the head-node user — define paths here, not on the runner.
+TARBALL_DIR="${AIC_SHARED_NFS}/${USER}/images/aic-ci-${SHORT}"
+CLIFF_STAGING_DIR="${AIC_SHARED_NFS}/${USER}/cliff-results-${SHORT}"
 
 cleanup() {
     echo "=== Cleaning up WORKDIR and TARBALL_DIR ==="
@@ -154,15 +154,18 @@ REMOTE
 # ---------------------------------------------------------------------------
 # Copy the HTML page back to the runner working directory
 # ---------------------------------------------------------------------------
+SPUR_USER="$(ssh -o ServerAliveInterval=30 "${AIC_SPUR_HOST}" id -un)"
+REMOTE_CLIFF_STAGING_DIR="${AIC_SHARED_NFS}/${SPUR_USER}/cliff-results-${SHORT}"
+
 echo "=== Copying cliff page back to runner ==="
 rm -rf cliff-page
 mkdir -p cliff-page
 scp -r -o ServerAliveInterval=30 \
-    "${AIC_SPUR_HOST}:${CLIFF_STAGING_DIR}/cliff-page/." \
+    "${AIC_SPUR_HOST}:${REMOTE_CLIFF_STAGING_DIR}/cliff-page/." \
     cliff-page/
 
 # Clean up the NFS staging dir now that we have a local copy
 ssh -o ServerAliveInterval=30 "${AIC_SPUR_HOST}" \
-    "rm -rf '${CLIFF_STAGING_DIR}'" || true
+    "rm -rf '${REMOTE_CLIFF_STAGING_DIR}'" || true
 
 echo "=== Cliff harvest complete for ${SHORT} — page at cliff-page/index.html ==="
