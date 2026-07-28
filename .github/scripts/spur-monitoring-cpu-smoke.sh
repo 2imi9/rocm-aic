@@ -50,11 +50,10 @@ trap cleanup EXIT
 # Clone the repo at this SHA so we have monitoring/ and docker/ locally
 # ---------------------------------------------------------------------------
 if [[ ! -d "${WORKDIR}" ]]; then
-    git clone --filter=blob:none \
+    git clone --filter=blob:none --no-single-branch \
         git@github.com:ROCm/rocm-aic.git "${WORKDIR}"
 fi
 cd "${WORKDIR}"
-git fetch origin "${SHA}"
 git checkout "${SHA}"
 
 # ---------------------------------------------------------------------------
