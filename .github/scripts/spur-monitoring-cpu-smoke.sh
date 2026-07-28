@@ -90,8 +90,8 @@ if [[ "${AIC_SMOKE_USE_REGISTRY}" == "1" ]]; then
     docker pull "${AIC_IMAGE}"
 else
     echo "=== Loading image from ${TARBALL_DIR} ==="
-    tarball="$(ls "${TARBALL_DIR}"/*.tar.zst "${TARBALL_DIR}"/*.tar.gz "${TARBALL_DIR}"/*.tar 2>/dev/null | head -1)"
-    [[ -n "${tarball}" ]] || { echo "ERROR: no tarball in ${TARBALL_DIR}" >&2; ls "${TARBALL_DIR}" >&2; exit 1; }
+    tarball="$(find "${TARBALL_DIR}" -maxdepth 1 \( -name '*.tar.zst' -o -name '*.tar.gz' -o -name '*.tar' \) 2>/dev/null | head -1)"
+    [[ -n "${tarball}" ]] || { echo "ERROR: no tarball in ${TARBALL_DIR}" >&2; ls -la "${TARBALL_DIR}" >&2 || true; exit 1; }
     case "${tarball}" in
         *.tar.zst) zstd -dc "${tarball}" | docker load ;;
         *.tar.gz)  gzip -dc "${tarball}" | docker load ;;
