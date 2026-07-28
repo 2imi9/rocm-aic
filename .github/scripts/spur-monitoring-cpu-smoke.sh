@@ -13,7 +13,7 @@ set -euo pipefail
 #
 # Uses the rocm-aic image tarball left by spur-dist-build.sh for the same SHA
 # (same TARBALL_DIR convention).  Set AIC_SMOKE_USE_REGISTRY=1 to pull from
-# Docker Hub instead.
+# a registry instead.
 
 SHA="${1:?usage: $0 <full-sha>}"
 SHORT="${SHA:0:7}"
@@ -26,15 +26,12 @@ AIC_SMOKE_USE_REGISTRY="${AIC_SMOKE_USE_REGISTRY:-0}"
 NODE_EXPORTER_IMAGE="${NODE_EXPORTER_IMAGE:-quay.io/prometheus/node-exporter:v1.8.2}"
 PROMETHEUS_IMAGE="${PROMETHEUS_IMAGE:-prom/prometheus:v2.55.1}"
 REPO="https://github.com/ROCm/rocm-aic.git"
-TARBALL_DIR="${AIC_SHARED_NFS}/\${USER}/images/aic-ci-${SHORT}"
-METRICS_PAGE_DIR="${AIC_SHARED_NFS}/\${USER}/metrics-page-${SHORT}"
 
 ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=4 "${AIC_SPUR_HOST}" env \
     SHA="${SHA}" \
     REPO="${REPO}" \
     AIC_IMAGE="${AIC_IMAGE}" \
-    TARBALL_DIR="${TARBALL_DIR}" \
-    METRICS_PAGE_DIR="${METRICS_PAGE_DIR}" \
+    AIC_SHARED_NFS="${AIC_SHARED_NFS}" \
     AIC_SPUR_CONTROLLER="${AIC_SPUR_CONTROLLER}" \
     SPUR_CONTROLLER_ADDR="${AIC_SPUR_CONTROLLER}" \
     AIC_SMOKE_USE_REGISTRY="${AIC_SMOKE_USE_REGISTRY}" \
@@ -45,6 +42,9 @@ set -euo pipefail
 
 SHORT="${SHA:0:7}"
 WORKDIR="$HOME/Projects/rocm-aic.${SHORT}"
+# $USER here is the head-node user — define paths here, not on the runner.
+TARBALL_DIR="${AIC_SHARED_NFS}/${USER}/images/aic-ci-${SHORT}"
+METRICS_PAGE_DIR="${AIC_SHARED_NFS}/${USER}/metrics-page-${SHORT}"
 
 cleanup() {
     echo "=== Cleaning up ==="
@@ -304,10 +304,13 @@ REMOTE
 # ---------------------------------------------------------------------------
 # Copy metrics page artifact back to the runner working directory
 # ---------------------------------------------------------------------------
+SPUR_USER="$(ssh -o ServerAliveInterval=30 "${AIC_SPUR_HOST}" id -un)"
+REMOTE_METRICS_PAGE_DIR="${AIC_SHARED_NFS}/${SPUR_USER}/metrics-page-${SHORT}"
+
 echo "=== Copying metrics page to runner ==="
 mkdir -p metrics-page
 scp -o ServerAliveInterval=30 \
-    "${AIC_SPUR_HOST}:${METRICS_PAGE_DIR}/index.html" \
+    "${AIC_SPUR_HOST}:${REMOTE_METRICS_PAGE_DIR}/index.html" \
     metrics-page/index.html
 
 echo "CPU monitoring smoke test passed for ${SHORT}"

@@ -31,13 +31,14 @@ WORKDIR="$HOME/Projects/rocm-aic.${SHORT}"
 # $USER here is the head-node user, not the runner's local user.
 TARBALL_DIR="${AIC_SHARED_NFS}/${USER}/images/aic-ci-${SHORT}"
 
-cleanup() {
-    echo "=== Cleaning up ==="
-    # Preserve logs/ so CI can retrieve them after the job completes.
+cleanup_on_fail() {
+    echo "=== Smoke test failed — cleaning up ==="
     rm -rf "${TARBALL_DIR}"
     find "${WORKDIR}" -mindepth 1 -maxdepth 1 -not -name logs -exec rm -rf {} +
 }
-trap cleanup EXIT
+# On success: preserve TARBALL_DIR so the following tiny-test stage can use it.
+# On failure: clean up immediately so no stale state is left behind.
+trap cleanup_on_fail ERR
 
 # Re-clone if WORKDIR is missing or checked out at the wrong SHA.
 ACTUAL_SHA="$(git -C "${WORKDIR}" rev-parse HEAD 2>/dev/null || true)"
