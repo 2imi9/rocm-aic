@@ -26,9 +26,9 @@ name: AIC Monitoring CPU Smoke Test
 
 on:
   workflow_dispatch:
-  schedule:
-    # 03:30 PST (11:30 UTC) daily — after the nightly smoke test completes
-    - cron: '30 11 * * *'
+  workflow_run:
+    workflows: ["AIC Nightly Dist Build"]
+    types: [completed]
 
 permissions:
   contents: write   # required to push the gh-pages branch
@@ -36,6 +36,9 @@ permissions:
 jobs:
   monitoring-cpu-smoke:
     name: CPU exporter smoke test + metrics page
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
     runs-on: [self-hosted, rocm-aic-cicd]
     timeout-minutes: 45
     env:
@@ -47,7 +50,9 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Run CPU monitoring smoke test on SPUR
-        run: bash .github/scripts/spur-monitoring-cpu-smoke.sh "${{ github.sha }}"
+        run: |
+          SHA="${{ github.event.workflow_run.head_sha || github.sha }}"
+          bash .github/scripts/spur-monitoring-cpu-smoke.sh "${SHA}"
 
       - name: Upload metrics reference page artifact
         uses: actions/upload-artifact@v4

@@ -13,7 +13,7 @@ set -euo pipefail
 #
 # Uses the rocm-aic image tarball left by spur-dist-build.sh for the same SHA
 # (same TARBALL_DIR convention).  Set AIC_SMOKE_USE_REGISTRY=1 to pull from
-# Docker Hub instead.
+# a registry instead.
 
 SHA="${1:?usage: $0 <full-sha>}"
 SHORT="${SHA:0:7}"
