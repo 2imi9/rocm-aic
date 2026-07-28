@@ -16,6 +16,9 @@
 [![Nightly Cliff](https://github.com/ROCm/rocm-aic/actions/workflows/aic-amd-nightly-cliff.yml/badge.svg)](https://github.com/ROCm/rocm-aic/actions/workflows/aic-amd-nightly-cliff.yml)
 [![Nightly Wheels](https://github.com/ROCm/rocm-aic/actions/workflows/aic-nightly-wheels.yml/badge.svg)](https://github.com/ROCm/rocm-aic/actions/workflows/aic-nightly-wheels.yml)
 [![Nightly Patch Validation](https://github.com/ROCm/rocm-aic/actions/workflows/aic-patches.yml/badge.svg)](https://github.com/ROCm/rocm-aic/actions/workflows/aic-patches.yml)
+[![Monitoring CPU Smoke](https://github.com/ROCm/rocm-aic/actions/workflows/aic-monitoring-cpu-smoke.yml/badge.svg)](https://github.com/ROCm/rocm-aic/actions/workflows/aic-monitoring-cpu-smoke.yml)
+[![Metrics Reference](https://img.shields.io/badge/Prometheus-Metrics_Reference-E05D00?logo=prometheus&logoColor=white)](https://rocm.github.io/rocm-aic/)
+[![Cliff Perf Dashboard](https://img.shields.io/badge/Cliff-Perf_Dashboard-2980b9?logo=github&logoColor=white)](https://rocm.github.io/rocm-aic/cliff/)
 
 > [!CAUTION]
 > This release is an *early-access* software technology preview. Running

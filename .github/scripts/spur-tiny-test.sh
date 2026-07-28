@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Runs on the self-hosted runner; SSHes to amd-aic-spur and runs tiny-test
+# Runs on the self-hosted runner; SSHes to the SPUR head node (AIC_SPUR_HOST) and runs tiny-test
 # against the tarball produced by spur-dist-build.sh for the same SHA (the stage
 # after spur-smoke-test.sh).  tiny-test brings up the compose MP stack
 # (standalone lmcache server + vLLM LMCacheMPConnector) with a tiny model and
@@ -19,16 +19,24 @@ set -euo pipefail
 SHA="${1:?usage: $0 <full-sha>}"
 SHORT="${SHA:0:7}"
 AIC_IMAGE="rocm-aic-ci-${SHORT}:latest"
-TARBALL_DIR="/shared_nfs/${USER}/images/aic-ci-${SHORT}"
-TINY_HF_HOME="/shared_nfs/${USER}/tiny-hf"
+AIC_SPUR_HOST="${AIC_SPUR_HOST:?AIC_SPUR_HOST must be set (e.g. via GitHub repo variable)}"
+AIC_SPUR_HOST="${AIC_SPUR_HOST//[$'\t\r\n ']}"
+AIC_SHARED_NFS="${AIC_SHARED_NFS:?AIC_SHARED_NFS must be set (e.g. via GitHub repo variable)}"
+AIC_SPUR_CONTROLLER="${AIC_SPUR_CONTROLLER:?AIC_SPUR_CONTROLLER must be set (e.g. via GitHub repo variable)}"
+TARBALL_DIR="${AIC_SHARED_NFS}/\${USER}/images/aic-ci-${SHORT}"
+TINY_HF_HOME="${AIC_SHARED_NFS}/\${USER}/tiny-hf"
 KEEP_ARTIFACTS="${KEEP_ARTIFACTS:-0}"
+REPO="https://github.com/ROCm/rocm-aic.git"
 
-ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=4 amd-aic-spur env \
+ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=4 "${AIC_SPUR_HOST}" env \
     SHA="${SHA}" \
+    REPO="${REPO}" \
     AIC_IMAGE="${AIC_IMAGE}" \
     TARBALL_DIR="${TARBALL_DIR}" \
     TINY_HF_HOME="${TINY_HF_HOME}" \
     KEEP_ARTIFACTS="${KEEP_ARTIFACTS}" \
+    AIC_SPUR_CONTROLLER="${AIC_SPUR_CONTROLLER}" \
+    SPUR_CONTROLLER_ADDR="${AIC_SPUR_CONTROLLER}" \
     bash << 'REMOTE'
 set -euo pipefail
 
@@ -46,6 +54,16 @@ if [[ "${KEEP_ARTIFACTS}" == "1" ]]; then
 else
     # Terminal stage: always clean up.
     trap _cleanup EXIT
+fi
+
+# Re-clone if WORKDIR is missing or checked out at the wrong SHA (e.g. stale
+# leftover from a prior failed run at a different commit with the same prefix).
+ACTUAL_SHA="$(git -C "${WORKDIR}" rev-parse HEAD 2>/dev/null || true)"
+if [[ ! -d "${WORKDIR}" || "${ACTUAL_SHA}" != "${SHA}" ]]; then
+    echo "=== (Re-)cloning ${REPO} at ${SHA} ==="
+    rm -rf "${WORKDIR}"
+    git clone --filter=blob:none --no-single-branch "${REPO}" "${WORKDIR}"
+    git -C "${WORKDIR}" checkout "${SHA}"
 fi
 
 echo "=== Running tiny-test (AIC_IMAGE=${AIC_IMAGE}) ==="
