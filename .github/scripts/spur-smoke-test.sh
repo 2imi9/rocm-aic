@@ -1,13 +1,21 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Runs on the self-hosted runner; SSHes to the SPUR head node (AIC_SPUR_HOST) and runs smoke-test
-# against the tarball produced by spur-dist-build.sh for the same SHA.
-# The clone and tarball are left in place for spur-tiny-test.sh (the next stage)
-# to use; spur-tiny-test.sh owns the final cleanup.  On failure, cleans up
-# immediately so no stale state is left behind.
+# Runs on the self-hosted runner; SSHes to the SPUR head node (AIC_SPUR_HOST) and
+# runs the requested smoke-test target against the tarball produced by
+# spur-dist-build.sh for the same SHA. The clone and tarball are left in place
+# for spur-tiny-test.sh (the next stage) to use; spur-tiny-test.sh owns the final
+# cleanup. On failure, cleans up immediately so no stale state is left behind.
 
-SHA="${1:?usage: $0 <full-sha>}"
+SHA="${1:?usage: $0 <full-sha> [smoke-test|smoke-test-fast]}"
+AIC_SMOKE_TEST_TARGET="${2:-smoke-test}"
+case "${AIC_SMOKE_TEST_TARGET}" in
+    smoke-test | smoke-test-fast) ;;
+    *)
+        echo "ERROR: unsupported smoke-test target: ${AIC_SMOKE_TEST_TARGET}" >&2
+        exit 2
+        ;;
+esac
 SHORT="${SHA:0:7}"
 AIC_IMAGE="rocm-aic-ci-${SHORT}:latest"
 AIC_SPUR_HOST="${AIC_SPUR_HOST:?AIC_SPUR_HOST must be set (e.g. via GitHub repo variable)}"
@@ -20,6 +28,7 @@ ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=4 "${AIC_SPUR_HOST}" env \
     SHA="${SHA}" \
     REPO="${REPO}" \
     AIC_IMAGE="${AIC_IMAGE}" \
+    AIC_SMOKE_TEST_TARGET="${AIC_SMOKE_TEST_TARGET}" \
     AIC_SHARED_NFS="${AIC_SHARED_NFS}" \
     AIC_SPUR_CONTROLLER="${AIC_SPUR_CONTROLLER}" \
     SPUR_CONTROLLER_ADDR="${AIC_SPUR_CONTROLLER}" \
@@ -48,13 +57,13 @@ if [[ ! -d "${WORKDIR}" || "${ACTUAL_SHA}" != "${SHA}" ]]; then
     git -C "${WORKDIR}" checkout "${SHA}"
 fi
 
-echo "=== Running smoke-test (AIC_IMAGE=${AIC_IMAGE}) ==="
+echo "=== Running ${AIC_SMOKE_TEST_TARGET} (AIC_IMAGE=${AIC_IMAGE}) ==="
 AIC_SPUR_CLUSTER=1 \
     AIC_IMAGE="${AIC_IMAGE}" \
     AIC_IMAGE_DIR="${TARBALL_DIR}" \
-    make -C "${WORKDIR}" smoke-test
+    make -C "${WORKDIR}" "${AIC_SMOKE_TEST_TARGET}"
 
-echo "=== smoke-test complete ==="
+echo "=== ${AIC_SMOKE_TEST_TARGET} complete ==="
 REMOTE
 
 echo "Smoke test passed for ${SHORT}"

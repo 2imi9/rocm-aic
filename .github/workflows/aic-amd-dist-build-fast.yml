@@ -98,8 +98,8 @@ jobs:
               description: 'Building image on the SPUR head node...',
             });
 
-      - name: Build image on the SPUR head node
-        run: bash /usr/local/lib/aic-ci/spur-dist-build.sh "${{ needs.authorize.outputs.sha }}"
+      - name: Build fast image on the SPUR head node
+        run: bash /usr/local/lib/aic-ci/spur-dist-build.sh "${{ needs.authorize.outputs.sha }}" dist-build-fast
 
       - name: Set commit status on success
         if: success() && needs.authorize.outputs.pr_number != ''
@@ -171,8 +171,8 @@ jobs:
               description: 'Running smoke test on the SPUR head node...',
             });
 
-      - name: Run smoke test on the SPUR head node
-        run: bash /usr/local/lib/aic-ci/spur-smoke-test.sh "${{ needs.authorize.outputs.sha }}"
+      - name: Run fast smoke test on the SPUR head node
+        run: bash /usr/local/lib/aic-ci/spur-smoke-test.sh "${{ needs.authorize.outputs.sha }}" smoke-test-fast
 
       - name: Set commit status on success
         if: success() && needs.authorize.outputs.pr_number != ''
