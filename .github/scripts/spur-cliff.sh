@@ -67,7 +67,9 @@ cd "${WORKDIR}"
 JOB_ID=$(AIC_SPUR_CLUSTER=1 \
     AIC_IMAGE="${AIC_IMAGE}" \
     AIC_IMAGE_DIR="${TARBALL_DIR}" \
-    make "${TARGET}" 2>&1 | grep -oP '(?<=submitted (cliff-short|aic-cliff) job )\d+|(?<=Submitted batch job )\d+' | tail -1)
+    make "${TARGET}" 2>&1 \
+    | grep -oE '(submitted (cliff-short|aic-cliff) job |Submitted batch job )[0-9]+' \
+    | grep -oE '[0-9]+$' | tail -1)
 
 if [[ -z "${JOB_ID}" ]]; then
     echo "ERROR: could not determine Slurm job ID from make ${TARGET} output" >&2
