@@ -90,8 +90,11 @@ if [[ "${AIC_SMOKE_USE_REGISTRY}" == "1" ]]; then
     docker pull "${AIC_IMAGE}"
 else
     echo "=== Loading image from ${TARBALL_DIR} ==="
-    tarball="$(find "${TARBALL_DIR}" -maxdepth 1 \( -name '*.tar.zst' -o -name '*.tar.gz' -o -name '*.tar' \) 2>/dev/null | head -1)"
-    [[ -n "${tarball}" ]] || { echo "ERROR: no tarball in ${TARBALL_DIR}" >&2; ls -la "${TARBALL_DIR}" >&2 || true; exit 1; }
+    # Match only the main image tarball: run-build-distribute.sh names it
+    # "${base}-${arch_tag}.{ext}" where base = AIC_IMAGE with '/:' -> '--'.
+    img_base="$(printf '%s' "${AIC_IMAGE}" | tr '/:' '--')"
+    tarball="$(find "${TARBALL_DIR}" -maxdepth 1 -name "${img_base}-*.tar.zst" -o -name "${img_base}-*.tar.gz" -o -name "${img_base}-*.tar" 2>/dev/null | head -1)"
+    [[ -n "${tarball}" ]] || { echo "ERROR: no tarball for ${AIC_IMAGE} in ${TARBALL_DIR}" >&2; ls -la "${TARBALL_DIR}" >&2 || true; exit 1; }
     case "${tarball}" in
         *.tar.zst) zstd -dc "${tarball}" | docker load ;;
         *.tar.gz)  gzip -dc "${tarball}" | docker load ;;
