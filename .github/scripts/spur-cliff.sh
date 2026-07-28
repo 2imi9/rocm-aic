@@ -19,6 +19,7 @@ AIC_SPUR_HOST="${AIC_SPUR_HOST//[$'\t\r\n ']}"
 AIC_SHARED_NFS="${AIC_SHARED_NFS:?AIC_SHARED_NFS must be set (e.g. via GitHub repo variable)}"
 AIC_SPUR_CONTROLLER="${AIC_SPUR_CONTROLLER:?AIC_SPUR_CONTROLLER must be set (e.g. via GitHub repo variable)}"
 TARBALL_DIR="${AIC_SHARED_NFS}/\${USER}/images/aic-ci-${SHORT}"
+REPO="https://github.com/ROCm/rocm-aic.git"
 
 case "${TARGET}" in
     cliff-short|cliff-submit) ;;
@@ -27,6 +28,7 @@ esac
 
 ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=4 "${AIC_SPUR_HOST}" env \
     SHA="${SHA}" \
+    REPO="${REPO}" \
     TARGET="${TARGET}" \
     AIC_IMAGE="${AIC_IMAGE}" \
     TARBALL_DIR="${TARBALL_DIR}" \
@@ -45,9 +47,13 @@ cleanup() {
 }
 trap cleanup EXIT
 
-if [[ ! -d "${WORKDIR}" ]]; then
-    echo "ERROR: ${WORKDIR} not found — did dist-build run first?" >&2
-    exit 1
+# Re-clone if WORKDIR is missing or checked out at the wrong SHA.
+ACTUAL_SHA="$(git -C "${WORKDIR}" rev-parse HEAD 2>/dev/null || true)"
+if [[ ! -d "${WORKDIR}" || "${ACTUAL_SHA}" != "${SHA}" ]]; then
+    echo "=== (Re-)cloning ${REPO} at ${SHA} ==="
+    rm -rf "${WORKDIR}"
+    git clone --filter=blob:none --no-single-branch "${REPO}" "${WORKDIR}"
+    git -C "${WORKDIR}" checkout "${SHA}"
 fi
 
 if [[ ! -d "${TARBALL_DIR}" ]]; then

@@ -18,16 +18,18 @@ set -euo pipefail
 SHA="${1:?usage: $0 <full-sha>}"
 SHORT="${SHA:0:7}"
 AIC_IMAGE="rocm-aic-ci-${SHORT}:latest"
-AIC_SPUR_HOST="${AIC_SPUR_HOST:?AIC_SPUR_HOST must be set}"
+AIC_SPUR_HOST="${AIC_SPUR_HOST:?AIC_SPUR_HOST must be set (e.g. via GitHub repo variable)}"
 AIC_SPUR_HOST="${AIC_SPUR_HOST//[$'\t\r\n ']}"
-AIC_SHARED_NFS="${AIC_SHARED_NFS:?AIC_SHARED_NFS must be set}"
-AIC_SPUR_CONTROLLER="${AIC_SPUR_CONTROLLER:?AIC_SPUR_CONTROLLER must be set}"
+AIC_SHARED_NFS="${AIC_SHARED_NFS:?AIC_SHARED_NFS must be set (e.g. via GitHub repo variable)}"
+AIC_SPUR_CONTROLLER="${AIC_SPUR_CONTROLLER:?AIC_SPUR_CONTROLLER must be set (e.g. via GitHub repo variable)}"
 AIC_SMOKE_USE_REGISTRY="${AIC_SMOKE_USE_REGISTRY:-0}"
-TARBALL_DIR="${AIC_SHARED_NFS}/${USER}/images/aic-ci-${SHORT}"
-METRICS_PAGE_DIR="${AIC_SHARED_NFS}/${USER}/metrics-page-${SHORT}"
+REPO="https://github.com/ROCm/rocm-aic.git"
+TARBALL_DIR="${AIC_SHARED_NFS}/\${USER}/images/aic-ci-${SHORT}"
+METRICS_PAGE_DIR="${AIC_SHARED_NFS}/\${USER}/metrics-page-${SHORT}"
 
 ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=4 "${AIC_SPUR_HOST}" env \
     SHA="${SHA}" \
+    REPO="${REPO}" \
     AIC_IMAGE="${AIC_IMAGE}" \
     TARBALL_DIR="${TARBALL_DIR}" \
     METRICS_PAGE_DIR="${METRICS_PAGE_DIR}" \
@@ -49,9 +51,11 @@ trap cleanup EXIT
 # ---------------------------------------------------------------------------
 # Clone the repo at this SHA so we have monitoring/ and docker/ locally
 # ---------------------------------------------------------------------------
-if [[ ! -d "${WORKDIR}" ]]; then
-    git clone --filter=blob:none --no-single-branch \
-        git@github.com:ROCm/rocm-aic.git "${WORKDIR}"
+ACTUAL_SHA="$(git -C "${WORKDIR}" rev-parse HEAD 2>/dev/null || true)"
+if [[ ! -d "${WORKDIR}" || "${ACTUAL_SHA}" != "${SHA}" ]]; then
+    echo "=== (Re-)cloning ${REPO} at ${SHA} ==="
+    rm -rf "${WORKDIR}"
+    git clone --filter=blob:none --no-single-branch "${REPO}" "${WORKDIR}"
 fi
 cd "${WORKDIR}"
 git checkout "${SHA}"

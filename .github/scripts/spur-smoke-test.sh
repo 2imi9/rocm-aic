@@ -14,9 +14,11 @@ AIC_SPUR_HOST="${AIC_SPUR_HOST:?AIC_SPUR_HOST must be set (e.g. via GitHub repo 
 AIC_SPUR_HOST="${AIC_SPUR_HOST//[$'\t\r\n ']}"
 AIC_SHARED_NFS="${AIC_SHARED_NFS:?AIC_SHARED_NFS must be set (e.g. via GitHub repo variable)}"
 AIC_SPUR_CONTROLLER="${AIC_SPUR_CONTROLLER:?AIC_SPUR_CONTROLLER must be set (e.g. via GitHub repo variable)}"
+REPO="https://github.com/ROCm/rocm-aic.git"
 
 ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=4 "${AIC_SPUR_HOST}" env \
     SHA="${SHA}" \
+    REPO="${REPO}" \
     AIC_IMAGE="${AIC_IMAGE}" \
     AIC_SHARED_NFS="${AIC_SHARED_NFS}" \
     AIC_SPUR_CONTROLLER="${AIC_SPUR_CONTROLLER}" \
@@ -36,6 +38,15 @@ cleanup() {
     find "${WORKDIR}" -mindepth 1 -maxdepth 1 -not -name logs -exec rm -rf {} +
 }
 trap cleanup EXIT
+
+# Re-clone if WORKDIR is missing or checked out at the wrong SHA.
+ACTUAL_SHA="$(git -C "${WORKDIR}" rev-parse HEAD 2>/dev/null || true)"
+if [[ ! -d "${WORKDIR}" || "${ACTUAL_SHA}" != "${SHA}" ]]; then
+    echo "=== (Re-)cloning ${REPO} at ${SHA} ==="
+    rm -rf "${WORKDIR}"
+    git clone --filter=blob:none --no-single-branch "${REPO}" "${WORKDIR}"
+    git -C "${WORKDIR}" checkout "${SHA}"
+fi
 
 echo "=== Running smoke-test (AIC_IMAGE=${AIC_IMAGE}) ==="
 AIC_SPUR_CLUSTER=1 \
