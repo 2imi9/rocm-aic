@@ -103,7 +103,7 @@ else
 fi
 
 MON_DIR="${WORKDIR}/monitoring"
-METRICS_DIR="/tmp/aic-prom-tsdb-${SHORT}"
+METRICS_DIR="${METRICS_PAGE_DIR}/prom-tsdb"
 mkdir -p "${METRICS_DIR}" "${METRICS_PAGE_DIR}"
 
 export AIC_IMAGE MON_DIR AIC_METRICS_DIR="${METRICS_DIR}"
