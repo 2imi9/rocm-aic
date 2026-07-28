@@ -23,6 +23,8 @@ AIC_SPUR_HOST="${AIC_SPUR_HOST//[$'\t\r\n ']}"
 AIC_SHARED_NFS="${AIC_SHARED_NFS:?AIC_SHARED_NFS must be set (e.g. via GitHub repo variable)}"
 AIC_SPUR_CONTROLLER="${AIC_SPUR_CONTROLLER:?AIC_SPUR_CONTROLLER must be set (e.g. via GitHub repo variable)}"
 AIC_SMOKE_USE_REGISTRY="${AIC_SMOKE_USE_REGISTRY:-0}"
+NODE_EXPORTER_IMAGE="${NODE_EXPORTER_IMAGE:-quay.io/prometheus/node-exporter:v1.8.2}"
+PROMETHEUS_IMAGE="${PROMETHEUS_IMAGE:-prom/prometheus:v2.55.1}"
 REPO="https://github.com/ROCm/rocm-aic.git"
 TARBALL_DIR="${AIC_SHARED_NFS}/\${USER}/images/aic-ci-${SHORT}"
 METRICS_PAGE_DIR="${AIC_SHARED_NFS}/\${USER}/metrics-page-${SHORT}"
@@ -36,6 +38,8 @@ ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=4 "${AIC_SPUR_HOST}" env \
     AIC_SPUR_CONTROLLER="${AIC_SPUR_CONTROLLER}" \
     SPUR_CONTROLLER_ADDR="${AIC_SPUR_CONTROLLER}" \
     AIC_SMOKE_USE_REGISTRY="${AIC_SMOKE_USE_REGISTRY}" \
+    NODE_EXPORTER_IMAGE="${NODE_EXPORTER_IMAGE}" \
+    PROMETHEUS_IMAGE="${PROMETHEUS_IMAGE}" \
     bash << 'REMOTE'
 set -euo pipefail
 
@@ -63,8 +67,7 @@ git checkout "${SHA}"
 # ---------------------------------------------------------------------------
 # Submit a CPU-only srun job
 # ---------------------------------------------------------------------------
-SRUN_SCRIPT="$(mktemp /tmp/aic-cpu-smoke-XXXXXX.sh)"
-trap 'rm -f "${SRUN_SCRIPT}"' EXIT
+SRUN_SCRIPT="$(mktemp "${WORKDIR}/aic-cpu-smoke-XXXXXX.sh")"
 
 cat > "${SRUN_SCRIPT}" << 'SRUN_BODY'
 #!/usr/bin/env bash
@@ -76,6 +79,8 @@ METRICS_PAGE_DIR="${3}"
 SHA="${4}"
 TARBALL_DIR="${5}"
 AIC_SMOKE_USE_REGISTRY="${6:-0}"
+NODE_EXPORTER_IMAGE="${7:-quay.io/prometheus/node-exporter:v1.8.2}"
+PROMETHEUS_IMAGE="${8:-prom/prometheus:v2.55.1}"
 SHORT="${SHA:0:7}"
 
 # ---------------------------------------------------------------------------
@@ -119,7 +124,7 @@ if ! timeout 1 bash -c "exec 3<>/dev/tcp/127.0.0.1/9100" 2>/dev/null; then
     docker run -d --name aic-node-exporter \
         --network host --pid host \
         -v /:/host:ro,rslave \
-        quay.io/prometheus/node-exporter:v1.8.2 \
+        "${NODE_EXPORTER_IMAGE}" \
         --path.rootfs=/host \
         --collector.diskstats \
         --collector.nvme \
@@ -154,7 +159,7 @@ docker run -d --name aic-prometheus \
     -v "${MON_DIR}/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro" \
     -v "${MON_DIR}/prometheus/rules:/etc/prometheus/rules:ro" \
     -v "${METRICS_DIR}:/prometheus" \
-    prom/prometheus:v2.55.1 \
+    "${PROMETHEUS_IMAGE}" \
     --config.file=/etc/prometheus/prometheus.yml \
     --storage.tsdb.path=/prometheus \
     --storage.tsdb.retention.time=1h \
@@ -289,7 +294,9 @@ srun \
         "${METRICS_PAGE_DIR}" \
         "${SHA}" \
         "${TARBALL_DIR}" \
-        "${AIC_SMOKE_USE_REGISTRY}"
+        "${AIC_SMOKE_USE_REGISTRY}" \
+        "${NODE_EXPORTER_IMAGE}" \
+        "${PROMETHEUS_IMAGE}"
 
 echo "=== srun job completed ==="
 REMOTE
