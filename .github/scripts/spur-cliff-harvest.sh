@@ -53,7 +53,8 @@ CLIFF_STAGING_DIR="${AIC_SHARED_NFS}/${USER}/cliff-results-${SHORT}"
 
 cleanup() {
     echo "=== Cleaning up WORKDIR and TARBALL_DIR ==="
-    rm -rf "${WORKDIR}" "${TARBALL_DIR}"
+    rm -rf "${WORKDIR}" "${TARBALL_DIR}" 2>/dev/null || \
+        rm -rf "${WORKDIR}" "${TARBALL_DIR}" 2>/dev/null || true
     # CLIFF_STAGING_DIR is on NFS and intentionally NOT cleaned here;
     # it is removed by the runner after scp completes.
 }
@@ -85,8 +86,8 @@ JOB_ID=$(SPUR_CONTROLLER_ADDR="${AIC_SPUR_CONTROLLER}" \
     AIC_IMAGE="${AIC_IMAGE}" \
     AIC_IMAGE_DIR="${TARBALL_DIR}" \
     make cliff-submit 2>&1 \
-  | grep -oP '(?<=submitted (cliff-short|aic-cliff) job )\d+|(?<=Submitted batch job )\d+' \
-  | tail -1)
+  | grep -oE '(submitted (cliff-short|aic-cliff) job |Submitted batch job )[0-9]+' \
+  | grep -oE '[0-9]+$' | tail -1)
 
 if [[ -z "${JOB_ID}" ]]; then
     echo "ERROR: could not determine Slurm job ID from make cliff-submit output" >&2

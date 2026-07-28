@@ -90,8 +90,13 @@ if [[ "${AIC_SMOKE_USE_REGISTRY}" == "1" ]]; then
     docker pull "${AIC_IMAGE}"
 else
     echo "=== Loading image from ${TARBALL_DIR} ==="
-    docker load -i "${TARBALL_DIR}/rocm-aic.tar"
-    docker tag rocm-aic:latest "${AIC_IMAGE}"
+    tarball="$(ls "${TARBALL_DIR}"/*.tar.zst "${TARBALL_DIR}"/*.tar.gz "${TARBALL_DIR}"/*.tar 2>/dev/null | head -1)"
+    [[ -n "${tarball}" ]] || { echo "ERROR: no tarball in ${TARBALL_DIR}" >&2; ls "${TARBALL_DIR}" >&2; exit 1; }
+    case "${tarball}" in
+        *.tar.zst) zstd -dc "${tarball}" | docker load ;;
+        *.tar.gz)  gzip -dc "${tarball}" | docker load ;;
+        *.tar)     docker load -i "${tarball}" ;;
+    esac
 fi
 
 MON_DIR="${WORKDIR}/monitoring"
