@@ -1080,12 +1080,13 @@ source '${AIC_DAY_DIR}/monitoring/monitoring-lib.sh'
 ensure_compose || { echo "[tiny-test] docker compose unavailable and could not be installed" >&2; exit 1; }
 
 # Tiny-model MP stack env.  Small footprint; the tiny model is downloaded online
-# into the persistent AIC_TINY_HF_HOME (Qwen2.5-0.5B is ungated -- no HF token).
+# into the persistent AIC_TINY_HF_HOME.
 export IMAGE_NAME='${AIC_IMAGE}'
 export ROCM_ARCH='${AIC_ROCM_ARCH}'
 export GPU=0
 export VLLM_MODEL='${AIC_TINY_MODEL}'
 export HF_HOME='${AIC_TINY_HF_HOME}'
+export HF_TOKEN='${HF_TOKEN:-}'
 export HF_HUB_OFFLINE=0 TRANSFORMERS_OFFLINE=0
 export LOG="\${_logdir}"
 export NVME_DATA=/tmp/aic-tiny-nvme NFS_DATA=/tmp/aic-tiny-nfs

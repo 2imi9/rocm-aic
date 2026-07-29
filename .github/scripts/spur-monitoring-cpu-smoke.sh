@@ -48,7 +48,7 @@ METRICS_PAGE_DIR="${AIC_SHARED_NFS}/${USER}/metrics-page-${SHORT}"
 
 cleanup() {
     echo "=== Cleaning up ==="
-    rm -rf "${WORKDIR}" "${METRICS_PAGE_DIR}"
+    rm -rf "${WORKDIR}"
 }
 trap cleanup EXIT
 
@@ -90,8 +90,11 @@ if [[ "${AIC_SMOKE_USE_REGISTRY}" == "1" ]]; then
     docker pull "${AIC_IMAGE}"
 else
     echo "=== Loading image from ${TARBALL_DIR} ==="
-    tarball="$(find "${TARBALL_DIR}" -maxdepth 1 \( -name '*.tar.zst' -o -name '*.tar.gz' -o -name '*.tar' \) 2>/dev/null | head -1)"
-    [[ -n "${tarball}" ]] || { echo "ERROR: no tarball in ${TARBALL_DIR}" >&2; ls -la "${TARBALL_DIR}" >&2 || true; exit 1; }
+    # Match only the main image tarball: run-build-distribute.sh names it
+    # "${base}-${arch_tag}.{ext}" where base = AIC_IMAGE with '/:' -> '--'.
+    img_base="$(printf '%s' "${AIC_IMAGE}" | tr '/:' '--')"
+    tarball="$(find "${TARBALL_DIR}" -maxdepth 1 -name "${img_base}-*.tar.zst" -o -name "${img_base}-*.tar.gz" -o -name "${img_base}-*.tar" 2>/dev/null | head -1)"
+    [[ -n "${tarball}" ]] || { echo "ERROR: no tarball for ${AIC_IMAGE} in ${TARBALL_DIR}" >&2; ls -la "${TARBALL_DIR}" >&2 || true; exit 1; }
     case "${tarball}" in
         *.tar.zst) zstd -dc "${tarball}" | docker load ;;
         *.tar.gz)  gzip -dc "${tarball}" | docker load ;;
@@ -100,7 +103,7 @@ else
 fi
 
 MON_DIR="${WORKDIR}/monitoring"
-METRICS_DIR="/tmp/aic-prom-tsdb-${SHORT}"
+METRICS_DIR="${METRICS_PAGE_DIR}/prom-tsdb"
 mkdir -p "${METRICS_DIR}" "${METRICS_PAGE_DIR}"
 
 export AIC_IMAGE MON_DIR AIC_METRICS_DIR="${METRICS_DIR}"
@@ -175,12 +178,13 @@ docker run -d --name aic-prometheus \
 # ---------------------------------------------------------------------------
 echo "=== Starting vLLM emulator (8000) ==="
 docker run -d --name aic-vllm-emulator \
+    --entrypoint python3 \
     --network host \
     -v "${WORKDIR}/monitoring/scripts/vllm_emulator_server.py:/app/vllm_emulator_server.py:ro" \
     -e VLLM_MODEL="${VLLM_CPU_MODEL:-facebook/opt-125m}" \
     -e PYTHONUNBUFFERED=1 \
     "${AIC_IMAGE}" \
-    python3 /app/vllm_emulator_server.py
+    /app/vllm_emulator_server.py
 
 # ---------------------------------------------------------------------------
 # 4. Wait for vLLM emulator to be healthy (up to 3 min)
@@ -317,5 +321,6 @@ mkdir -p metrics-page
 scp -o ServerAliveInterval=30 \
     "${AIC_SPUR_HOST}:${REMOTE_METRICS_PAGE_DIR}/index.html" \
     metrics-page/index.html
+ssh -o ServerAliveInterval=30 "${AIC_SPUR_HOST}" rm -rf "${REMOTE_METRICS_PAGE_DIR}"
 
 echo "CPU monitoring smoke test passed for ${SHORT}"
