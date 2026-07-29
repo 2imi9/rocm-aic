@@ -76,9 +76,8 @@ services:
   node-exporter:
     image: ${AIC_NODE_EXPORTER_IMAGE:-quay.io/prometheus/node-exporter:v1.8.2}
     container_name: aic-node-exporter
-    profiles: ["exporters"]
+    profiles: ["exporters", "exporters-cpu"]
     network_mode: host
-    pid: host
     restart: unless-stopped
     volumes:
       - /:/host:ro,rslave
@@ -126,9 +125,8 @@ services:
     # image is only built/pulled when `exporters-fabric` is actually selected.
     image: ${AIC_NVME_EXPORTER_IMAGE:-aic-nvme-exporter:local}
     container_name: aic-nvme-exporter
-    profiles: ["exporters-fabric"]
+    profiles: ["exporters-fabric", "exporters-cpu"]
     network_mode: host
-    pid: host
     privileged: true
     restart: unless-stopped
     volumes:
@@ -151,7 +149,7 @@ services:
     # matches the built image; only built/pulled under `exporters-fabric`.
     image: ${AIC_RDMA_EXPORTER_IMAGE:-aic-rdma-exporter:local}
     container_name: aic-rdma-exporter
-    profiles: ["exporters-fabric"]
+    profiles: ["exporters-fabric", "exporters-cpu"]
     network_mode: host
     restart: unless-stopped
     volumes:

@@ -27,8 +27,10 @@ services:
   vllm-emulator:
     image: ${IMAGE_NAME:-rocm-aic}
     container_name: aic-vllm-emulator
-    ports:
-      - "8000:8000"   # OpenAI API + /metrics (same port as production vllm)
+    # Host networking keeps the emulator reachable at localhost:8000, consistent
+    # with the production vllm service and the monitoring stack's Prometheus
+    # scrape config (which targets localhost:<port>).
+    network_mode: host
     # No devices: block — no /dev/kfd or /dev/dri needed for CPU emulation.
     volumes:
       - ${HF_HOME:-~/.cache/huggingface}:/hf
