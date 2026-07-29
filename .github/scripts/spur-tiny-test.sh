@@ -34,6 +34,7 @@ ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=4 "${AIC_SPUR_HOST}" env \
     KEEP_ARTIFACTS="${KEEP_ARTIFACTS}" \
     AIC_SPUR_CONTROLLER="${AIC_SPUR_CONTROLLER}" \
     SPUR_CONTROLLER_ADDR="${AIC_SPUR_CONTROLLER}" \
+    HF_TOKEN="${HF_TOKEN:-}" \
     bash << 'REMOTE'
 set -euo pipefail
 
@@ -71,6 +72,7 @@ AIC_SPUR_CLUSTER=1 \
     AIC_IMAGE="${AIC_IMAGE}" \
     AIC_IMAGE_DIR="${TARBALL_DIR}" \
     AIC_TINY_HF_HOME="${TINY_HF_HOME}" \
+    HF_TOKEN="${HF_TOKEN:-}" \
     make -C "${WORKDIR}" tiny-test
 
 echo "=== tiny-test complete ==="

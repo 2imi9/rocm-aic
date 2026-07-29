@@ -48,7 +48,7 @@ METRICS_PAGE_DIR="${AIC_SHARED_NFS}/${USER}/metrics-page-${SHORT}"
 
 cleanup() {
     echo "=== Cleaning up ==="
-    rm -rf "${WORKDIR}" "${METRICS_PAGE_DIR}"
+    rm -rf "${WORKDIR}"
 }
 trap cleanup EXIT
 
@@ -321,5 +321,6 @@ mkdir -p metrics-page
 scp -o ServerAliveInterval=30 \
     "${AIC_SPUR_HOST}:${REMOTE_METRICS_PAGE_DIR}/index.html" \
     metrics-page/index.html
+ssh -o ServerAliveInterval=30 "${AIC_SPUR_HOST}" rm -rf "${REMOTE_METRICS_PAGE_DIR}"
 
 echo "CPU monitoring smoke test passed for ${SHORT}"
