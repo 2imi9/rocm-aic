@@ -160,6 +160,7 @@ services:
       - |
         if [ "${GDS_MODE:-0}" = "1" ]; then
           exec lmcache server \
+            --no-separate-object-groups \
             --host 0.0.0.0 \
             --port "$$LMCACHE_PORT" \
             --l1-size-gb "$$LMCACHE_L1_SIZE_GB" \
@@ -170,6 +171,7 @@ services:
           # via the mounted LMCACHE_CONFIG_FILE; none = pure DRAM (the minimal MP
           # config -- used by tiny-test and DRAM-only deployments).
           exec lmcache server \
+            --no-separate-object-groups \
             --host 0.0.0.0 \
             --port "$$LMCACHE_PORT" \
             --l1-size-gb "$$LMCACHE_L1_SIZE_GB" \
@@ -179,6 +181,7 @@ services:
           # backends, so both backend_params MUST include use_direct_io (LMCache
           # rejects the adapter otherwise); POSIX/NFS uses buffered I/O (false).
           exec lmcache server \
+            --no-separate-object-groups \
             --host 0.0.0.0 \
             --port "$$LMCACHE_PORT" \
             --l1-size-gb "$$LMCACHE_L1_SIZE_GB" \

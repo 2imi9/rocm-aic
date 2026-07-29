@@ -1,0 +1,71 @@
+# Copyright (c) Advanced Micro Devices, Inc. All rights reserved.
+#
+# SPDX-License-Identifier: MIT
+#
+# CPU-only monitoring smoke test and Prometheus metrics reference page.
+#
+# Submits an srun job to a CPU-only SPUR node (no GPU resource requested) that:
+#   1. Starts node-exporter, nvme-exporter, rdma-exporter, and Prometheus
+#   2. Starts the vLLM emulator (monitoring/scripts/vllm_emulator_server.py)
+#      backed by the existing rocm-aic image — no GPU required
+#   3. Issues 3 real LLM prompts and asserts non-empty completions
+#   4. Scrapes all active /metrics endpoints, extracts the full metric catalogue,
+#      and generates a static HTML reference page
+#
+# On success the HTML is deployed to the gh-pages branch so it is served at
+# the repo's GitHub Pages URL.
+#
+# Requires (all already in use by sibling nightly workflows):
+#   secrets.AIC_SPUR_HOST        — SSH target for the SPUR head node
+#   secrets.AIC_SHARED_NFS       — shared NFS path for image tarballs + scratch
+#   secrets.AIC_SPUR_CONTROLLER  — SPUR controller address
+#
+# One-time repo setup: Settings → Pages → Source: gh-pages branch, / (root).
+
+name: AIC Monitoring CPU Smoke Test
+
+on:
+  workflow_dispatch:
+  workflow_run:
+    workflows: ["AIC Nightly Dist Build"]
+    types: [completed]
+
+permissions:
+  contents: write   # required to push the gh-pages branch
+
+jobs:
+  monitoring-cpu-smoke:
+    name: CPU exporter smoke test + metrics page
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
+    runs-on: [self-hosted, rocm-aic-cicd]
+    timeout-minutes: 45
+    env:
+      AIC_SPUR_HOST:       ${{ secrets.AIC_SPUR_HOST }}
+      AIC_SHARED_NFS:      ${{ secrets.AIC_SHARED_NFS }}
+      AIC_SPUR_CONTROLLER: ${{ secrets.AIC_SPUR_CONTROLLER }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run CPU monitoring smoke test on SPUR
+        run: |
+          SHA="${{ github.event.workflow_run.head_sha || github.sha }}"
+          bash .github/scripts/spur-monitoring-cpu-smoke.sh "${SHA}"
+
+      - name: Upload metrics reference page artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: prometheus-metrics-${{ github.sha }}
+          path: metrics-page/
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Deploy metrics reference to GitHub Pages
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./metrics-page
+          publish_branch: gh-pages
+          force_orphan: false

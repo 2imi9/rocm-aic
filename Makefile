@@ -6,9 +6,9 @@
 # "repo root" is this directory (no dependency on any parent checkout).
 REPO_ROOT := $(CURDIR)
 
-# ai-dynamo/nixl upstream main (2026-07-10); AIS_MT added via patches/nixl/.
+# ai-dynamo/nixl v1.3.2 release; AIS_MT added via patches/nixl/.
 NIXL_GIT_URL := https://github.com/ai-dynamo/nixl.git
-NIXL_SHA     := 644facf0eb3de14ec63c1d2831238f63cd03c0e0
+NIXL_SHA     := v1.3.2
 
 IMAGE_NAME ?= rocm-aic
 
@@ -60,7 +60,7 @@ ROCM_ARCH := $(if $(strip $(ROCM_ARCH)),$(strip $(ROCM_ARCH)),$(_ROCM_ARCH_DETEC
 # Caps parallel compile jobs in the image build, Empty = use all cores ($(nproc)).
 BUILD_JOBS ?=
 
-export ROCM_ARCH GPU GDS_SLAB_DATA LOG HF_HOME IMAGE_NAME BUILD_JOBS
+export ROCM_ARCH GPU GDS_SLAB_DATA LOG HF_HOME HF_TOKEN IMAGE_NAME BUILD_JOBS
 export LMCACHE_PORT LMCACHE_L1_SIZE_GB LMCACHE_NVME_POOL LMCACHE_NVME_SLOT_SIZE LMCACHE_NFS_POOL
 export NVME_DATA NFS_DATA
 export VLLM_MODEL TENSOR_PARALLEL_SIZE
