@@ -13,7 +13,7 @@
 #      and generates a static HTML reference page
 #
 # On success the HTML is deployed to the gh-pages branch so it is served at
-# the repo's GitHub Pages URL.
+# https://rocm.github.io/rocm-aic/prometheus/.
 #
 # Requires (all already in use by sibling nightly workflows):
 #   secrets.AIC_SPUR_HOST        — SSH target for the SPUR head node
@@ -21,6 +21,7 @@
 #   secrets.AIC_SPUR_CONTROLLER  — SPUR controller address
 #
 # One-time repo setup: Settings → Pages → Source: gh-pages branch, / (root).
+# The page will be served at https://rocm.github.io/rocm-aic/prometheus/.
 
 name: AIC Monitoring CPU Smoke Test
 
@@ -67,5 +68,7 @@ jobs:
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           publish_dir: ./metrics-page
+          destination_dir: prometheus
           publish_branch: gh-pages
           force_orphan: false
+          keep_files: true
