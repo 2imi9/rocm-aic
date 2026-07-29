@@ -13,8 +13,8 @@ set -euo pipefail
 #   * Nightly (dist-build -> smoke -> tiny -> cliff): cliff runs next and needs
 #     the artifacts, so the nightly tiny-test step sets KEEP_ARTIFACTS=1 and this
 #     script only cleans up on failure (spur-cliff.sh does the final cleanup).
-# The tiny model is cached in a persistent shared HF dir (outside the tarball
-# dir) so it is downloaded once and reused across runs.
+# The tiny model uses the cluster-wide HF cache so it is downloaded once and
+# reused across CI workflows and SPUR accounts.
 
 SHA="${1:?usage: $0 <full-sha>}"
 SHORT="${SHA:0:7}"
@@ -42,7 +42,7 @@ SHORT="${SHA:0:7}"
 WORKDIR="$HOME/Projects/rocm-aic.${SHORT}"
 # $USER here is the head-node user — define paths here, not on the runner.
 TARBALL_DIR="${AIC_SHARED_NFS}/${USER}/images/aic-ci-${SHORT}"
-TINY_HF_HOME="${AIC_SHARED_NFS}/${USER}/tiny-hf"
+TINY_HF_HOME="${AIC_SHARED_NFS}/huggingface"
 
 _cleanup() {
     echo "=== Cleaning up ==="
