@@ -17,3 +17,21 @@ matrix:
     sources:
       - '**/*.md'
     default_encoding: utf-8
+
+  - name: HTML
+    aspell:
+      lang: en
+    dictionary:
+      wordlists:
+        - .wordlist.txt
+      encoding: utf-8
+    pipeline:
+      - pyspelling.filters.html:
+          ignores:
+            - code
+            - pre
+            - style
+            - script
+    sources:
+      - '.github/pages/*.html'
+    default_encoding: utf-8

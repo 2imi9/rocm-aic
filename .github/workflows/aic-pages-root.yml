@@ -1,0 +1,35 @@
+# Copyright (c) Advanced Micro Devices, Inc. All rights reserved.
+#
+# SPDX-License-Identifier: MIT
+#
+# Publishes .github/pages/index.html to the root of the gh-pages branch so
+# https://rocm.github.io/rocm-aic/ shows a landing page linking to the
+# Prometheus metrics reference (/prometheus/) and Cliff dashboard (/cliff/).
+
+name: AIC Pages Root
+
+on:
+  push:
+    branches: [main]
+    paths: [.github/pages/index.html]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  deploy:
+    name: Publish root index to GitHub Pages
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Deploy root index to GitHub Pages
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./.github/pages
+          destination_dir: .
+          publish_branch: gh-pages
+          force_orphan: false
+          keep_files: true

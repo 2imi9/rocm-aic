@@ -4,8 +4,8 @@
 [![Platform](https://img.shields.io/badge/platform-linux-lightgrey.svg)](README.md)
 [![ROCm](https://img.shields.io/badge/ROCm-7.2.4-green.svg)](https://rocm.docs.amd.com)
 [![vLLM](https://img.shields.io/badge/vLLM-0.25.0+rocm723-blue.svg)](https://github.com/vllm-project/vllm)
-[![LMCache](https://img.shields.io/badge/LMCache-v0.5.1-blue.svg)](https://github.com/LMCache/LMCache)
-[![NIXL](https://img.shields.io/badge/NIXL-v1.3.1-blue.svg)](https://github.com/ai-dynamo/nixl)
+[![LMCache](https://img.shields.io/badge/LMCache-v0.5.2-blue.svg)](https://github.com/LMCache/LMCache)
+[![NIXL](https://img.shields.io/badge/NIXL-v1.3.2-blue.svg)](https://github.com/ai-dynamo/nixl)
 [![hsa-snoop](https://img.shields.io/badge/hsa--snoop-v1.0.0-blue.svg)](https://github.com/sbates130272/hsa-snoop)
 [![Spelling](https://github.com/ROCm/rocm-aic/actions/workflows/aic-spellcheck.yml/badge.svg)](https://github.com/ROCm/rocm-aic/actions/workflows/aic-spellcheck.yml)
 [![Lint](https://github.com/ROCm/rocm-aic/actions/workflows/aic-lint.yml/badge.svg)](https://github.com/ROCm/rocm-aic/actions/workflows/aic-lint.yml)
@@ -17,7 +17,7 @@
 [![Nightly Wheels](https://github.com/ROCm/rocm-aic/actions/workflows/aic-nightly-wheels.yml/badge.svg)](https://github.com/ROCm/rocm-aic/actions/workflows/aic-nightly-wheels.yml)
 [![Nightly Patch Validation](https://github.com/ROCm/rocm-aic/actions/workflows/aic-patches.yml/badge.svg)](https://github.com/ROCm/rocm-aic/actions/workflows/aic-patches.yml)
 [![Monitoring CPU Smoke](https://github.com/ROCm/rocm-aic/actions/workflows/aic-monitoring-cpu-smoke.yml/badge.svg)](https://github.com/ROCm/rocm-aic/actions/workflows/aic-monitoring-cpu-smoke.yml)
-[![Metrics Reference](https://img.shields.io/badge/Prometheus-Metrics_Reference-E05D00?logo=prometheus&logoColor=white)](https://rocm.github.io/rocm-aic/)
+[![Metrics Reference](https://img.shields.io/badge/Prometheus-Metrics_Reference-E05D00?logo=prometheus&logoColor=white)](https://rocm.github.io/rocm-aic/prometheus/)
 [![Cliff Perf Dashboard](https://img.shields.io/badge/Cliff-Perf_Dashboard-2980b9?logo=github&logoColor=white)](https://rocm.github.io/rocm-aic/cliff/)
 
 > [!CAUTION]
@@ -43,7 +43,7 @@ platform.
 Ubuntu 24.04  (rocm/dev-ubuntu-24.04:7.2.4-complete, ROCm 7.2.4, Python 3.12)
   └── vLLM v0.25.0+rocm723  (pre-built wheel — bundles torch/triton/flash-attn)
         └── LMCacheMPConnector (ZMQ)
-              └── LMCache server (standalone MP mode)  [v0.5.1 + 7 AMD patches]
+              └── LMCache server (standalone MP mode)  [v0.5.2 + 8 AMD patches]
                     ├── L1:  GPU / CPU DRAM   (--l1-size-gb)
                     │    or  hipFile NVMe slab (GDS L1 mode)
                     ├── L2a: NIXL AIS_MT → local NVMe   (hipFile P2PDMA, GDS)
@@ -57,8 +57,8 @@ each release):
 | --- | --- | --- |
 | Base OS | `rocm/dev-ubuntu-24.04:7.2.4-complete` | Ubuntu 24.04, ROCm 7.2.4, Python 3.12 |
 | vLLM | `wheels.vllm.ai/rocm/0.25.0/rocm723` | v0.25.0+rocm723 (pre-built wheel, bundles torch) |
-| LMCache | `LMCache/LMCache` (upstream) | `v0.5.1` + 7 AMD patches |
-| NIXL | `ai-dynamo/nixl` (upstream) | `v1.3.1` + `nixl-rocm-ais-mt.patch` |
+| LMCache | `LMCache/LMCache` (upstream) | `v0.5.2` + 8 AMD patches |
+| NIXL | `ai-dynamo/nixl` (upstream) | `v1.3.2` + `nixl-rocm-ais-mt.patch` |
 | hipFile | `ROCm/rocm-systems` | `develop` @ `6901b670` |
 
 ## Pip-installable nightly wheels
