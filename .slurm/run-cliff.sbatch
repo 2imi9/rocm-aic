@@ -229,6 +229,11 @@ AIC_ROCM_USE_AITER="${AIC_ROCM_USE_AITER:-1}"
 # NFS HF cache, exceeding the 1200 s default -> spurious "never became ready".
 # Raise for big models / slow shared storage.
 AIC_VLLM_READY_TIMEOUT="${AIC_VLLM_READY_TIMEOUT:-1200}"
+# Model load format.  'fastsafetensors' (default) parallelises weight loading
+# across ranks for faster startup; falls back to 'safetensors' if the model
+# lacks safetensor shards.  Set AIC_LOAD_FORMAT=safetensors to use the serial
+# loader (e.g. when debugging load-order issues or on non-safetensor checkpoints).
+AIC_LOAD_FORMAT="${AIC_LOAD_FORMAT:-fastsafetensors}"
 
 # Every arm now serves vLLM on the compose-published :8000 (arms run sequentially,
 # each stack torn down before the next), so one endpoint port suffices.
