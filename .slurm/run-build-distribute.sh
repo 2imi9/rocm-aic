@@ -492,7 +492,7 @@ cmd_build() {
             local _cdir
             _cdir="${AIC_CACHE_DIR%/}/$(_arch_tag)"
             log "build cache: local dir ${_cdir} (mode ${AIC_CACHE_MODE}, builder ${AIC_BUILDX_BUILDER})"
-            _cache_args="--cache-from type=local,src=${_cdir} --cache-to type=local,dest=${_cdir},mode=${AIC_CACHE_MODE}"
+            _cache_args="--cache-from type=local,src=${_cdir} --cache-to type=local,dest=${_cdir},mode=${AIC_CACHE_MODE},ignore-error=true"
             _mkdir="mkdir -p '${_cdir}'; "
         fi
         # Create the docker-container builder once per node (idempotent), then
@@ -533,11 +533,6 @@ echo "[build] pruning BuildKit cache on \$(hostname) before build ..."
 docker buildx prune --builder ${AIC_BUILDX_BUILDER} --force 2>/dev/null || true
 echo "[build] disk after prune: \$(df -h / | awk 'NR==2{print \$3\" free / \"\$2\" total (\"\$5\" used)\"}')"
 tmp="${tarball}.partial.\$\$"
-# BuildKit exits non-zero on cache-write lock races even when the image was
-# exported successfully.  Run the pipeline without pipefail so we can inspect
-# each side independently: fail only when the compressor side failed (meaning
-# the tarball itself is corrupt/missing), treat buildx-only failures as warnings.
-set +o pipefail
 docker buildx build --builder ${AIC_BUILDX_BUILDER} --progress=plain --output type=docker,dest=- \
     --build-arg ROCM_ARCH="${AIC_ROCM_ARCH}" \
     ${_secret_arg} \
@@ -545,14 +540,6 @@ docker buildx build --builder ${AIC_BUILDX_BUILDER} --progress=plain --output ty
     -f "${AIC_DAY_DIR}/docker/Dockerfile" \
     -t "${AIC_IMAGE}" \
     "${AIC_DAY_DIR}" | ${COMPRESS_CMD} > "\${tmp}"
-_rc=("\${PIPESTATUS[@]}")
-set -o pipefail
-if [ "\${_rc[1]}" -ne 0 ]; then
-    echo "[build] ERROR: compressor exited \${_rc[1]}; tarball may be corrupt" >&2; exit 1
-fi
-if [ "\${_rc[0]}" -ne 0 ]; then
-    echo "[build] WARN: docker buildx exited \${_rc[0]} (cache lock race?); tarball written, continuing"
-fi
 mv -f "\${tmp}" "${tarball}"
 echo "[build] saved \$(du -h "${tarball}" | cut -f1) -> ${tarball}"
 exit 0
