@@ -9,6 +9,10 @@ permissions:
   pull-requests: write
   statuses: write
 
+concurrency:
+  group: hardware-ci-spur-${{ github.event.issue.number || github.sha }}
+  cancel-in-progress: false
+
 jobs:
   # Validate /run-ci-fast slash command on PRs; skipped for manual triggers.
   authorize:
