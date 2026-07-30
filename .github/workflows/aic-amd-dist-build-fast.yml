@@ -1,4 +1,4 @@
-name: AIC Hardware Test - AMD Dist Build
+name: AIC Hardware Test - AMD Dist Build (fast)
 
 on:
   workflow_dispatch:
@@ -10,12 +10,12 @@ permissions:
   statuses: write
 
 jobs:
-  # Validate /run-ci slash command on PRs; skipped for manual triggers
+  # Validate /run-ci-fast slash command on PRs; skipped for manual triggers.
   authorize:
     if: >
       github.event_name != 'issue_comment' || (
         github.event.issue.pull_request != null &&
-        contains(github.event.comment.body, '/run-ci')
+        contains(github.event.comment.body, '/run-ci-fast')
       )
     runs-on: ubuntu-latest
     permissions:
