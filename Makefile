@@ -141,8 +141,6 @@ export AIC_SPUR_CONTROLLER  ?= $(SPUR_CONTROLLER_ADDR)
 export AIC_IMAGE_DIR        ?= $(AIC_SHARED_NFS)/rocm-aic/images
 # BuildKit mutates its cache in place, so don't share that between runners.
 export AIC_CACHE_DIR        ?= $(AIC_SHARED_NFS)/rocm-aic/images/buildcache/$(USER)
-# Use the same model cache for both normal and tiny-model CI paths.
-export AIC_TINY_HF_HOME     ?= $(AIC_SHARED_NFS)/huggingface
 # SPUR nodes have 8x NVMe drives combined into a single LVM at /mnt/m2m_nobackup.
 # Use override (not ?=) so these win over the top-level ?= defaults set earlier.
 # HF_HOME points to the cluster-wide model cache since /scratch does not exist

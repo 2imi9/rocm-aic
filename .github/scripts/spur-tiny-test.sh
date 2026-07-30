@@ -42,7 +42,6 @@ SHORT="${SHA:0:7}"
 WORKDIR="$HOME/Projects/rocm-aic.${SHORT}"
 # $USER here is the head-node user — define paths here, not on the runner.
 TARBALL_DIR="${AIC_SHARED_NFS}/${USER}/images/aic-ci-${SHORT}"
-TINY_HF_HOME="${AIC_SHARED_NFS}/huggingface"
 
 _cleanup() {
     echo "=== Cleaning up ==="
@@ -71,7 +70,6 @@ echo "=== Running tiny-test (AIC_IMAGE=${AIC_IMAGE}) ==="
 AIC_SPUR_CLUSTER=1 \
     AIC_IMAGE="${AIC_IMAGE}" \
     AIC_IMAGE_DIR="${TARBALL_DIR}" \
-    AIC_TINY_HF_HOME="${TINY_HF_HOME}" \
     HF_TOKEN="${HF_TOKEN:-}" \
     make -C "${WORKDIR}" tiny-test
 
