@@ -23,12 +23,12 @@
 # One-time repo setup: Settings → Pages → Source: gh-pages branch, / (root).
 # The page will be served at https://rocm.github.io/rocm-aic/prometheus/.
 
-name: AIC Monitoring CPU Smoke Test
+name: AIC Hardware Test - Monitoring CPU Smoke Test
 
 on:
   workflow_dispatch:
   workflow_run:
-    workflows: ["AIC Nightly Dist Build"]
+    workflows: ["AIC Hardware Test - Nightly Dist Build"]
     types: [completed]
 
 permissions:

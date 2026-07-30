@@ -1,4 +1,4 @@
-name: AIC AMD Dist Build
+name: AIC Hardware Test - AMD Dist Build
 
 on:
   workflow_dispatch:
