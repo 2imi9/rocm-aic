@@ -23,8 +23,6 @@ AIC_SPUR_HOST="${AIC_SPUR_HOST//[$'\t\r\n ']}"
 AIC_SHARED_NFS="${AIC_SHARED_NFS:?AIC_SHARED_NFS must be set (e.g. via GitHub repo variable)}"
 AIC_SPUR_CONTROLLER="${AIC_SPUR_CONTROLLER:?AIC_SPUR_CONTROLLER must be set (e.g. via GitHub repo variable)}"
 AIC_SMOKE_USE_REGISTRY="${AIC_SMOKE_USE_REGISTRY:-0}"
-NODE_EXPORTER_IMAGE="${NODE_EXPORTER_IMAGE:-quay.io/prometheus/node-exporter:v1.8.2}"
-PROMETHEUS_IMAGE="${PROMETHEUS_IMAGE:-prom/prometheus:v2.55.1}"
 REPO="https://github.com/ROCm/rocm-aic.git"
 
 ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=4 "${AIC_SPUR_HOST}" env \
@@ -35,8 +33,6 @@ ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=4 "${AIC_SPUR_HOST}" env \
     AIC_SPUR_CONTROLLER="${AIC_SPUR_CONTROLLER}" \
     SPUR_CONTROLLER_ADDR="${AIC_SPUR_CONTROLLER}" \
     AIC_SMOKE_USE_REGISTRY="${AIC_SMOKE_USE_REGISTRY}" \
-    NODE_EXPORTER_IMAGE="${NODE_EXPORTER_IMAGE}" \
-    PROMETHEUS_IMAGE="${PROMETHEUS_IMAGE}" \
     bash << 'REMOTE'
 set -euo pipefail
 
@@ -79,9 +75,12 @@ METRICS_PAGE_DIR="${3}"
 SHA="${4}"
 TARBALL_DIR="${5}"
 AIC_SMOKE_USE_REGISTRY="${6:-0}"
-NODE_EXPORTER_IMAGE="${7:-quay.io/prometheus/node-exporter:v1.8.2}"
-PROMETHEUS_IMAGE="${8:-prom/prometheus:v2.55.1}"
 SHORT="${SHA:0:7}"
+
+MON_DIR="${WORKDIR}/monitoring"
+EMULATOR_COMPOSE="${WORKDIR}/docker/docker-compose.emulator.yml"
+METRICS_DIR="${METRICS_PAGE_DIR}/prom-tsdb"
+mkdir -p "${METRICS_DIR}" "${METRICS_PAGE_DIR}"
 
 # ---------------------------------------------------------------------------
 # Load or pull the rocm-aic image (docker is on the compute node, not the head node)
@@ -90,8 +89,6 @@ if [[ "${AIC_SMOKE_USE_REGISTRY}" == "1" ]]; then
     docker pull "${AIC_IMAGE}"
 else
     echo "=== Loading image from ${TARBALL_DIR} ==="
-    # Match only the main image tarball: run-build-distribute.sh names it
-    # "${base}-${arch_tag}.{ext}" where base = AIC_IMAGE with '/:' -> '--'.
     img_base="$(printf '%s' "${AIC_IMAGE}" | tr '/:' '--')"
     tarball="$(find "${TARBALL_DIR}" -maxdepth 1 -name "${img_base}-*.tar.zst" -o -name "${img_base}-*.tar.gz" -o -name "${img_base}-*.tar" 2>/dev/null | head -1)"
     [[ -n "${tarball}" ]] || { echo "ERROR: no tarball for ${AIC_IMAGE} in ${TARBALL_DIR}" >&2; ls -la "${TARBALL_DIR}" >&2 || true; exit 1; }
@@ -102,89 +99,48 @@ else
     esac
 fi
 
-MON_DIR="${WORKDIR}/monitoring"
-METRICS_DIR="${METRICS_PAGE_DIR}/prom-tsdb"
-mkdir -p "${METRICS_DIR}" "${METRICS_PAGE_DIR}"
-
-export AIC_IMAGE MON_DIR AIC_METRICS_DIR="${METRICS_DIR}"
-
-# Source shared monitoring helpers
+# ---------------------------------------------------------------------------
+# Source shared monitoring helpers and configure for CPU-only smoke test
+# ---------------------------------------------------------------------------
 # shellcheck source=monitoring/monitoring-lib.sh
 source "${MON_DIR}/monitoring-lib.sh"
 
-# GPU exporters are not available on CPU-only nodes; skip them.
-export AIC_EXPORTERS=1
-export AIC_AMDGPU_EXPORTER=0   # custom flag read in start_monitoring below
+export AIC_IMAGE AIC_MONITORING=1 AIC_EXPORTERS=1 AIC_CPU_SMOKE=1
+export MON_DIR MON_COMPOSE="${MON_DIR}/docker-compose.monitoring.yml"
+export AIC_METRICS_DIR="${METRICS_DIR}"
 
-cleanup_containers() {
+cleanup() {
     echo "=== Stopping all containers ==="
-    docker rm -f aic-prometheus aic-node-exporter aic-nvme-exporter \
-                 aic-rdma-exporter aic-vllm-emulator 2>/dev/null || true
+    IMAGE_NAME="${AIC_IMAGE}" \
+        docker compose -f "${EMULATOR_COMPOSE}" down --remove-orphans 2>/dev/null || true
+    stop_monitoring
     rm -rf "${METRICS_DIR}"
 }
-trap cleanup_containers EXIT
+trap cleanup EXIT
 
 # ---------------------------------------------------------------------------
-# 1. Start exporters (no GPU)
+# 1. Pre-build fabric exporter images (nvme + rdma) from source
 # ---------------------------------------------------------------------------
-echo "=== Starting node-exporter (9100) ==="
-if ! timeout 1 bash -c "exec 3<>/dev/tcp/127.0.0.1/9100" 2>/dev/null; then
-    docker run -d --name aic-node-exporter \
-        --network host --pid host \
-        -v /:/host:ro,rslave \
-        "${NODE_EXPORTER_IMAGE}" \
-        --path.rootfs=/host \
-        --collector.diskstats \
-        --collector.nvme \
-        --web.listen-address=:9100
-fi
-
-echo "=== Building and starting nvme-exporter (9998) ==="
-if ! timeout 1 bash -c "exec 3<>/dev/tcp/127.0.0.1/9998" 2>/dev/null; then
-    docker build -q -t aic-nvme-exporter:local "${MON_DIR}/nvme-exporter"
-    docker run -d --name aic-nvme-exporter \
-        --network host --pid host --privileged \
-        -v /dev:/dev -v /sys:/sys:ro \
-        aic-nvme-exporter:local
-fi
-
-echo "=== Building and starting rdma-exporter (9879) ==="
-if ! timeout 1 bash -c "exec 3<>/dev/tcp/127.0.0.1/9879" 2>/dev/null; then
-    docker build -q -t aic-rdma-exporter:local "${MON_DIR}/rdma-exporter"
-    docker run -d --name aic-rdma-exporter \
-        --network host \
-        -v /sys:/sys:ro \
-        aic-rdma-exporter:local
-fi
+echo "=== Building fabric exporter images ==="
+docker compose -f "${MON_COMPOSE}" \
+    --profile exporters-cpu \
+    build nvme-exporter rdma-exporter
+export AIC_NVME_EXPORTER_IMAGE=aic-nvme-exporter:local
+export AIC_RDMA_EXPORTER_IMAGE=aic-rdma-exporter:local
 
 # ---------------------------------------------------------------------------
-# 2. Start Prometheus
+# 2. Start monitoring stack (prometheus + node-exporter + nvme + rdma)
 # ---------------------------------------------------------------------------
-echo "=== Starting Prometheus (9090) ==="
-docker run -d --name aic-prometheus \
-    --network host \
-    --user "$(id -u):$(id -g)" \
-    -v "${MON_DIR}/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro" \
-    -v "${MON_DIR}/prometheus/rules:/etc/prometheus/rules:ro" \
-    -v "${METRICS_DIR}:/prometheus" \
-    "${PROMETHEUS_IMAGE}" \
-    --config.file=/etc/prometheus/prometheus.yml \
-    --storage.tsdb.path=/prometheus \
-    --storage.tsdb.retention.time=1h \
-    --web.listen-address=:9090
+echo "=== Starting monitoring stack ==="
+export PROM_UID="$(id -u)" PROM_GID="$(id -g)"
+start_monitoring
 
 # ---------------------------------------------------------------------------
-# 3. Start vLLM emulator
+# 3. Start vLLM emulator via its compose file
 # ---------------------------------------------------------------------------
 echo "=== Starting vLLM emulator (8000) ==="
-docker run -d --name aic-vllm-emulator \
-    --entrypoint python3 \
-    --network host \
-    -v "${WORKDIR}/monitoring/scripts/vllm_emulator_server.py:/app/vllm_emulator_server.py:ro" \
-    -e VLLM_MODEL="${VLLM_CPU_MODEL:-facebook/opt-125m}" \
-    -e PYTHONUNBUFFERED=1 \
-    "${AIC_IMAGE}" \
-    /app/vllm_emulator_server.py
+IMAGE_NAME="${AIC_IMAGE}" VLLM_CPU_MODEL="${VLLM_CPU_MODEL:-facebook/opt-125m}" \
+    docker compose -f "${EMULATOR_COMPOSE}" up -d
 
 # ---------------------------------------------------------------------------
 # 4. Wait for vLLM emulator to be healthy (up to 3 min)
@@ -233,6 +189,12 @@ echo "=== Waiting for first scrape cycle ==="
 sleep 12
 
 echo "=== Exporter health check ==="
+monitoring_healthcheck
+
+# ---------------------------------------------------------------------------
+# 7. Scrape all metric endpoints; generate HTML reference page
+# ---------------------------------------------------------------------------
+echo "=== Scraping metrics endpoints ==="
 declare -A EXPORTER_PORTS=(
     [node_exporter]=9100
     [nvme_exporter]=9998
@@ -240,31 +202,6 @@ declare -A EXPORTER_PORTS=(
     [vllm]=8000
     [prometheus]=9090
 )
-declare -A EXPORTER_PREFIXES=(
-    [node_exporter]="^node_"
-    [nvme_exporter]="^nvme_"
-    [rdma_exporter]="^rdma_"
-    [vllm]="^vllm_"
-    [prometheus]="^prometheus_"
-)
-all_ok=1
-for name in "${!EXPORTER_PORTS[@]}"; do
-    port="${EXPORTER_PORTS[$name]}"
-    prefix="${EXPORTER_PREFIXES[$name]}"
-    if curl -sf "http://localhost:${port}/metrics" 2>/dev/null | grep -qE "${prefix}"; then
-        echo "  OK:   ${name} (:${port}) — ${prefix} metrics present"
-    else
-        echo "  WARN: ${name} (:${port}) — ${prefix} metrics absent (may be expected on CPU node)"
-        all_ok=0
-    fi
-done
-# Non-fatal: GPU exporters expected to be absent on CPU nodes.
-[[ "${all_ok}" -eq 0 ]] && echo "Some exporters WARN (GPU exporters absent on CPU-only node is expected)"
-
-# ---------------------------------------------------------------------------
-# 7. Scrape all metric endpoints; generate HTML reference page
-# ---------------------------------------------------------------------------
-echo "=== Scraping metrics endpoints ==="
 METRICS_ARGS=()
 for name in "${!EXPORTER_PORTS[@]}"; do
     port="${EXPORTER_PORTS[$name]}"
@@ -303,9 +240,7 @@ srun \
         "${METRICS_PAGE_DIR}" \
         "${SHA}" \
         "${TARBALL_DIR}" \
-        "${AIC_SMOKE_USE_REGISTRY}" \
-        "${NODE_EXPORTER_IMAGE}" \
-        "${PROMETHEUS_IMAGE}"
+        "${AIC_SMOKE_USE_REGISTRY}"
 
 echo "=== srun job completed ==="
 REMOTE

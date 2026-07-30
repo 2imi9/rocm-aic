@@ -69,7 +69,13 @@ ensure_compose() {
 
 mon_profile() {  # echo the compose --profile args for the exporter fleet
     [[ "${AIC_EXPORTERS}" == "1" ]] || return 0
-    printf -- '--profile\nexporters\n'
+    # AIC_CPU_SMOKE=1: use the cpu-only exporter subset (node+nvme+rdma, no GPU
+    # exporters).  Default: full exporters profile (includes amdgpu + hsa-snoop).
+    if [[ "${AIC_CPU_SMOKE:-0}" == "1" ]]; then
+        printf -- '--profile\nexporters-cpu\n'
+    else
+        printf -- '--profile\nexporters\n'
+    fi
     # Also enable the fabric exporters (nvme/rdma) when their images are provided
     # (built by run-build-distribute.sh build-exporters, loaded on the node).
     [[ -n "${AIC_NVME_EXPORTER_IMAGE:-}${AIC_RDMA_EXPORTER_IMAGE:-}" ]] \
@@ -79,7 +85,8 @@ mon_profile() {  # echo the compose --profile args for the exporter fleet
 # Compose service container_names -- used to sweep up any leftovers from a
 # crashed run before/after a compose up/down (compose down handles the rest).
 MON_CONTAINERS=(aic-prometheus aic-node-exporter aic-amdgpu-exporter
-                aic-nvme-exporter aic-rdma-exporter aic-hsa-snoop)
+                aic-nvme-exporter aic-rdma-exporter aic-hsa-snoop
+                aic-vllm-emulator)
 
 start_monitoring() {
     [[ "${AIC_MONITORING}" == "1" ]] || { log "monitoring disabled (AIC_MONITORING=0)"; return 0; }
