@@ -41,6 +41,7 @@ WORKDIR="$HOME/Projects/rocm-aic.${SHORT}"
 # $USER here is the head-node user — define paths here, not on the runner.
 TARBALL_DIR="${AIC_SHARED_NFS}/${USER}/images/aic-ci-${SHORT}"
 METRICS_PAGE_DIR="${AIC_SHARED_NFS}/${USER}/metrics-page-${SHORT}"
+HF_HOME="${AIC_SHARED_NFS}/huggingface"
 
 cleanup() {
     echo "=== Cleaning up ==="
@@ -75,6 +76,7 @@ METRICS_PAGE_DIR="${3}"
 SHA="${4}"
 TARBALL_DIR="${5}"
 AIC_SMOKE_USE_REGISTRY="${6:-0}"
+HF_HOME="${7}"
 SHORT="${SHA:0:7}"
 
 MON_DIR="${WORKDIR}/monitoring"
@@ -102,6 +104,7 @@ fi
 # ---------------------------------------------------------------------------
 # Source shared monitoring helpers and configure for CPU-only smoke test
 # ---------------------------------------------------------------------------
+mkdir -p "${HF_HOME}"
 # shellcheck source=monitoring/monitoring-lib.sh
 source "${MON_DIR}/monitoring-lib.sh"
 
@@ -139,7 +142,8 @@ start_monitoring
 # 3. Start vLLM emulator via its compose file
 # ---------------------------------------------------------------------------
 echo "=== Starting vLLM emulator (8000) ==="
-IMAGE_NAME="${AIC_IMAGE}" VLLM_CPU_MODEL="${VLLM_CPU_MODEL:-facebook/opt-125m}" \
+HF_HOME="${HF_HOME}" IMAGE_NAME="${AIC_IMAGE}" \
+    VLLM_CPU_MODEL="${VLLM_CPU_MODEL:-facebook/opt-125m}" \
     docker compose -f "${EMULATOR_COMPOSE}" up -d
 
 # ---------------------------------------------------------------------------
@@ -240,7 +244,8 @@ srun \
         "${METRICS_PAGE_DIR}" \
         "${SHA}" \
         "${TARBALL_DIR}" \
-        "${AIC_SMOKE_USE_REGISTRY}"
+        "${AIC_SMOKE_USE_REGISTRY}" \
+        "${HF_HOME}"
 
 echo "=== srun job completed ==="
 REMOTE

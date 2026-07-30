@@ -20,7 +20,7 @@
 | `VLLM_EXTRA_ARGS` | — | Extra vLLM args appended verbatim (e.g. `--hf-overrides '{...}'`; single-quote embedded JSON) |
 | `COMPOSE_PLUGIN_VERSION` | `v2.40.0` | docker compose v2 plugin version installed by `make ensure-compose` / `ensure_compose` when missing |
 | `AIC_TINY_MODEL` | `Qwen/Qwen2.5-0.5B-Instruct` | Model served by `make tiny-test` (end-to-end serve check) |
-| `AIC_TINY_HF_HOME` | `<image-dir>/tiny-hf` | Persistent HF cache the tiny model is downloaded into for `tiny-test` |
+| `HF_HOME` | `~/.cache/huggingface` (`/shared_nfs/huggingface` on SPUR) | Persistent Hugging Face cache used by normal, cliff, monitoring, and tiny-model paths |
 | `TENSOR_PARALLEL_SIZE` | `1` | vLLM tensor parallel degree |
 | `GPU` | `0` | ROCR_VISIBLE_DEVICES for the vllm container |
 | `AIC_NVME_AUTO` | `1` (cliff) | Auto-detect a dedicated local NVMe for the LMCache tiers: reuse a mounted `aic-lmcache` volume, else format+mount a raw non-root spare, else use a non-root mounted NVMe, else node-local `/tmp`. `0` forces `/tmp`; needs passwordless `sudo` to format/mount |

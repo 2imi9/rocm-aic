@@ -38,8 +38,7 @@ set -euo pipefail
 
 SHORT="${SHA:0:7}"
 WORKDIR="$HOME/Projects/rocm-aic.${SHORT}"
-# $USER here is the head-node user — define paths here, not on the runner.
-TARBALL_DIR="${AIC_SHARED_NFS}/${USER}/images/aic-ci-${SHORT}"
+TARBALL_DIR="${AIC_SHARED_NFS}/rocm-aic/images/aic-ci-${SHORT}"
 
 cleanup() {
     echo "=== Cleaning up ==="

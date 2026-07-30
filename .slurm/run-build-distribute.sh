@@ -73,6 +73,8 @@
 #   AIC_ROCM_ARCH        gfx arch(es) baked in; ';'-list   (default: all vLLM archs)
 #   AIC_IMAGE            image name:tag                    (default: rocm-aic:latest)
 #   AIC_IMAGE_DIR        shared dir for the tarball        (default: /scratch/$USER/images)
+#   HF_HOME              persistent Hugging Face cache used by tiny-test
+#                        (default: <AIC_IMAGE_DIR>/tiny-hf)
 #   AIC_FORCE_LOAD       test/push: force a reload from the tarball even when the
 #                        node's image is already current (default: 0).  By default
 #                        a node auto-reloads only when the /scratch tarball is
@@ -198,9 +200,9 @@ AIC_TEST_MEM="${AIC_TEST_MEM:-32G}"
 # Brings up the compose MP stack (standalone lmcache + vLLM LMCacheMPConnector)
 # with a small model and asserts one non-empty chat completion.  A fast functional
 # gate that exercises the connector path a smoke-test cannot.  The model is
-# downloaded once into AIC_TINY_HF_HOME (a persistent shared HF cache) and reused.
+# downloaded once into HF_HOME (a persistent shared HF cache) and reused.
 AIC_TINY_MODEL="${AIC_TINY_MODEL:-Qwen/Qwen2.5-0.5B-Instruct}"
-AIC_TINY_HF_HOME="${AIC_TINY_HF_HOME:-${AIC_IMAGE_DIR}/tiny-hf}"
+HF_HOME="${HF_HOME:-${AIC_IMAGE_DIR}/tiny-hf}"
 AIC_TINY_TIME="${AIC_TINY_TIME:-00:25:00}"
 AIC_TINY_CPUS="${AIC_TINY_CPUS:-8}"
 AIC_TINY_MEM="${AIC_TINY_MEM:-32G}"
@@ -490,7 +492,7 @@ cmd_build() {
             local _cdir
             _cdir="${AIC_CACHE_DIR%/}/$(_arch_tag)"
             log "build cache: local dir ${_cdir} (mode ${AIC_CACHE_MODE}, builder ${AIC_BUILDX_BUILDER})"
-            _cache_args="--cache-from type=local,src=${_cdir} --cache-to type=local,dest=${_cdir},mode=${AIC_CACHE_MODE}"
+            _cache_args="--cache-from type=local,src=${_cdir} --cache-to type=local,dest=${_cdir},mode=${AIC_CACHE_MODE},ignore-error=true"
             _mkdir="mkdir -p '${_cdir}'; "
         fi
         # Create the docker-container builder once per node (idempotent), then
@@ -531,11 +533,6 @@ echo "[build] pruning BuildKit cache on \$(hostname) before build ..."
 docker buildx prune --builder ${AIC_BUILDX_BUILDER} --force 2>/dev/null || true
 echo "[build] disk after prune: \$(df -h / | awk 'NR==2{print \$3\" free / \"\$2\" total (\"\$5\" used)\"}')"
 tmp="${tarball}.partial.\$\$"
-# BuildKit exits non-zero on cache-write lock races even when the image was
-# exported successfully.  Run the pipeline without pipefail so we can inspect
-# each side independently: fail only when the compressor side failed (meaning
-# the tarball itself is corrupt/missing), treat buildx-only failures as warnings.
-set +o pipefail
 docker buildx build --builder ${AIC_BUILDX_BUILDER} --progress=plain --output type=docker,dest=- \
     --build-arg ROCM_ARCH="${AIC_ROCM_ARCH}" \
     ${_secret_arg} \
@@ -543,14 +540,6 @@ docker buildx build --builder ${AIC_BUILDX_BUILDER} --progress=plain --output ty
     -f "${AIC_DAY_DIR}/docker/Dockerfile" \
     -t "${AIC_IMAGE}" \
     "${AIC_DAY_DIR}" | ${COMPRESS_CMD} > "\${tmp}"
-_rc=("\${PIPESTATUS[@]}")
-set -o pipefail
-if [ "\${_rc[1]}" -ne 0 ]; then
-    echo "[build] ERROR: compressor exited \${_rc[1]}; tarball may be corrupt" >&2; exit 1
-fi
-if [ "\${_rc[0]}" -ne 0 ]; then
-    echo "[build] WARN: docker buildx exited \${_rc[0]} (cache lock race?); tarball written, continuing"
-fi
 mv -f "\${tmp}" "${tarball}"
 echo "[build] saved \$(du -h "${tarball}" | cut -f1) -> ${tarball}"
 exit 0
@@ -1051,7 +1040,7 @@ cmd_tiny_test() {
         _sel=(--constraint="${AIC_TEST_CONSTRAINT}")
         log "tiny-test via sbatch (partition ${AIC_BUILD_PARTITION}, constraint ${AIC_TEST_CONSTRAINT})"
     fi
-    log "image: ${AIC_IMAGE}  model: ${AIC_TINY_MODEL}  hf: ${AIC_TINY_HF_HOME}"
+    log "image: ${AIC_IMAGE}  model: ${AIC_TINY_MODEL}  hf: ${HF_HOME}"
 
     local remote_script
     remote_script="$(cat <<REMOTE
@@ -1080,12 +1069,12 @@ source '${AIC_DAY_DIR}/monitoring/monitoring-lib.sh'
 ensure_compose || { echo "[tiny-test] docker compose unavailable and could not be installed" >&2; exit 1; }
 
 # Tiny-model MP stack env.  Small footprint; the tiny model is downloaded online
-# into the persistent AIC_TINY_HF_HOME.
+# into the persistent HF_HOME forwarded by the Makefile.
 export IMAGE_NAME='${AIC_IMAGE}'
 export ROCM_ARCH='${AIC_ROCM_ARCH}'
 export GPU=0
 export VLLM_MODEL='${AIC_TINY_MODEL}'
-export HF_HOME='${AIC_TINY_HF_HOME}'
+export HF_HOME='${HF_HOME}'
 export HF_TOKEN='${HF_TOKEN:-}'
 export HF_HUB_OFFLINE=0 TRANSFORMERS_OFFLINE=0
 export LOG="\${_logdir}"
