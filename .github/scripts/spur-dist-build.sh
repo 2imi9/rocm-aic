@@ -2,13 +2,21 @@
 set -euo pipefail
 
 # Runs on the self-hosted runner; SSHes to the SPUR head node (AIC_SPUR_HOST), clones the repo at
-# the current SHA, and runs dist-build with a CI-scoped image name and tarball
-# path. The clone and tarball are left in place for spur-smoke-test.sh to use;
-# spur-smoke-test.sh owns the final cleanup.
+# the current SHA, and runs the requested dist-build target with a CI-scoped
+# image name and tarball path. The clone and tarball are left in place for
+# spur-smoke-test.sh to use; spur-smoke-test.sh owns the final cleanup.
 #
 # On failure, cleans up immediately so no stale state is left behind.
 
-SHA="${1:?usage: $0 <full-sha>}"
+SHA="${1:?usage: $0 <full-sha> [dist-build|dist-build-fast]}"
+AIC_DIST_BUILD_TARGET="${2:-dist-build}"
+case "${AIC_DIST_BUILD_TARGET}" in
+    dist-build | dist-build-fast) ;;
+    *)
+        echo "ERROR: unsupported build target: ${AIC_DIST_BUILD_TARGET}" >&2
+        exit 2
+        ;;
+esac
 SHORT="${SHA:0:7}"
 REPO="https://github.com/ROCm/rocm-aic.git"
 AIC_IMAGE="rocm-aic-ci-${SHORT}:latest"
@@ -21,6 +29,7 @@ ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=4 "${AIC_SPUR_HOST}" env \
     SHA="${SHA}" \
     REPO="${REPO}" \
     AIC_IMAGE="${AIC_IMAGE}" \
+    AIC_DIST_BUILD_TARGET="${AIC_DIST_BUILD_TARGET}" \
     AIC_SHARED_NFS="${AIC_SHARED_NFS}" \
     AIC_SPUR_CONTROLLER="${AIC_SPUR_CONTROLLER}" \
     SPUR_CONTROLLER_ADDR="${AIC_SPUR_CONTROLLER}" \
@@ -45,13 +54,13 @@ git checkout "${SHA}"
 
 mkdir -p "${TARBALL_DIR}"
 
-echo "=== Running dist-build (AIC_SPUR_CLUSTER=1, AIC_IMAGE=${AIC_IMAGE}) ==="
+echo "=== Running ${AIC_DIST_BUILD_TARGET} (AIC_SPUR_CLUSTER=1, AIC_IMAGE=${AIC_IMAGE}) ==="
 AIC_SPUR_CLUSTER=1 \
     AIC_IMAGE="${AIC_IMAGE}" \
     AIC_IMAGE_DIR="${TARBALL_DIR}" \
-    make dist-build
+    make "${AIC_DIST_BUILD_TARGET}"
 
-echo "=== dist-build complete — tarball in ${TARBALL_DIR} ==="
+echo "=== ${AIC_DIST_BUILD_TARGET} complete — tarball in ${TARBALL_DIR} ==="
 REMOTE
 
 echo "Build succeeded for ${SHORT}"

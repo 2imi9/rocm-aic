@@ -1,4 +1,4 @@
-name: AIC Nightly Dist Build
+name: AIC Hardware Test - Nightly Dist Build
 
 on:
   schedule:

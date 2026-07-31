@@ -81,6 +81,7 @@ services:
       args:
         ROCM_ARCH: ${ROCM_ARCH}
         BUILD_JOBS: ${BUILD_JOBS:-}
+        AIC_UCX_FAST: ${AIC_UCX_FAST:-}
     image: ${IMAGE_NAME:-rocm-aic}
     container_name: aic-lmcache
     # Cross-container HIP IPC (LMCacheMPConnector registering vLLM's KV tensors) on

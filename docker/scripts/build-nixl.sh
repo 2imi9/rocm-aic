@@ -63,17 +63,34 @@ cd ucx-src
 rm -rf build
 mkdir build
 cd build
-../configure \
-	--prefix="${UCX_PREFIX}" \
-	--enable-shared \
-	--disable-static \
-	--disable-doxygen-doc \
-	--enable-optimizations \
-	--enable-devel-headers \
-	--with-rocm="${ROCM_PATH}" \
-	--with-verbs \
-	--with-dm \
+# UCX configure flags.
+UCX_CONFIGURE_FLAGS=(
+	--prefix="${UCX_PREFIX}"
+	--enable-shared
+	--disable-static
+	--disable-doxygen-doc
+	--enable-devel-headers
+	--with-rocm="${ROCM_PATH}"
+	--with-verbs
+	--with-dm
 	--enable-mt
+)
+# Improve compile time for dist-build-fast target.
+if [[ "${AIC_UCX_FAST:-0}" == "1" ]]; then
+	UCX_CONFIGURE_FLAGS+=(
+		--disable-logging
+		--disable-debug
+		--disable-assertions
+		--disable-params-check
+		--without-knem
+		--without-xpmem
+		--without-ugni
+		--without-java
+	)
+else
+	UCX_CONFIGURE_FLAGS+=(--enable-optimizations)
+fi
+../configure "${UCX_CONFIGURE_FLAGS[@]}"
 make -j"${BUILD_JOBS}"
 make install
 ldconfig
@@ -89,6 +106,9 @@ MESON_EXTRA=(
 	"-Drocm_ais_path=${AIS_PATH}"
 	"-Ducx_path=${UCX_PREFIX}"
 	"-Ddisable_gds_backend=true"
+	"-Dbuild_tests=false" # disable unused components
+	"-Dbuild_examples=false"
+	"-Ddisable_plugins=OBJ,AZURE_BLOB"
 	"--prefix=${NIXL_INSTALL_PREFIX}"
 )
 

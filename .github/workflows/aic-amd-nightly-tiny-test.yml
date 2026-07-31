@@ -1,8 +1,8 @@
-name: AIC Nightly Tiny Test
+name: AIC Hardware Test - Nightly Tiny Test
 
 on:
   workflow_run:
-    workflows: ["AIC Nightly Smoke Test"]
+    workflows: ["AIC Hardware Test - Nightly Smoke Test"]
     types: [completed]
 
 jobs:

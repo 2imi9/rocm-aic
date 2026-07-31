@@ -1,8 +1,8 @@
-name: AIC Nightly Smoke Test
+name: AIC Hardware Test - Nightly Smoke Test
 
 on:
   workflow_run:
-    workflows: ["AIC Nightly Dist Build"]
+    workflows: ["AIC Hardware Test - Nightly Dist Build"]
     types: [completed]
 
 jobs:

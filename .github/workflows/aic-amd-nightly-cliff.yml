@@ -14,11 +14,11 @@
 # GitHub Pages setup (one-time): Settings → Pages → Source: gh-pages branch, / (root).
 # The page will be served at https://rocm.github.io/rocm-aic/cliff/.
 
-name: AIC Nightly Cliff
+name: AIC Hardware Test - Nightly Cliff
 
 on:
   workflow_run:
-    workflows: ["AIC Nightly Tiny Test"]
+    workflows: ["AIC Hardware Test - Nightly Tiny Test"]
     types: [completed]
 
 permissions:

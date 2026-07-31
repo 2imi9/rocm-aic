@@ -128,6 +128,8 @@ DIST := $(CURDIR)/.slurm/run-build-distribute.sh
 AIC_CI_LIB_DIR    ?= /usr/local/lib/aic-ci
 AIC_CI_SCRIPT_DIR := $(CURDIR)/.github/scripts
 
+AIC_FAST_ARCH ?= gfx950
+
 # ---- SPUR cluster overrides ------------------------------------------------
 # When AIC_SPUR_CLUSTER=1, default storage paths to AIC_SHARED_NFS (the NFS
 # volume shared across all SPUR compute nodes) instead of /scratch (not present
@@ -187,7 +189,8 @@ EXPORT_TARBALL ?= $(CURDIR)/$(EXPORT_PREFIX)-$(_GEN_DATE)-$(_GIT_SHORT_REV)$(_GI
 .PHONY: help ensure-compose build up up-batch up-gds-l1 up-gds-l1-batch down logs logs-lmcache logs-vllm \
         ps shell-lmcache shell-vllm restart-vllm restart-lmcache cliff plot venv \
         monitoring-up monitoring-down monitoring-logs monitoring-build-exporters \
-        dist-build dist-build-exporters dist-push smoke-test tiny-test install-ci-scripts cliff-submit cliff-short \
+        dist-build dist-build-fast dist-build-exporters dist-push smoke-test smoke-test-fast \
+        tiny-test install-ci-scripts cliff-submit cliff-short \
         cliff-long-64k cliff-long-128k \
         export _check_hf_token _prep_dirs _check_gds_slab
 
@@ -221,11 +224,13 @@ help:
 	@echo "Distribute / cliff targets (Slurm; wrap .slurm/ scripts + sbatch):"
 	@echo "  (dist-build/dist-build-exporters/smoke-test submit via sbatch and log to logs/<job-id>/)"
 	@echo "  make dist-build        Build image (+ fabric exporters) on a Slurm build node, save tarballs"
+	@echo "  make dist-build-fast   Single-arch dev build (AIC_FAST_ARCH=$(AIC_FAST_ARCH), no exporters) -- faster iteration"
 	@echo "  make dist-build-exporters  Build ONLY the nvme/rdma exporter images (no main rebuild)"
 	@echo "  make dist-push         Tag + push the built image (needs AIC_PUSH_REF)"
 	@echo "  make smoke-test        Load + smoke-test the image on a GPU+NVMe node"
 	@echo "                         (also sanity-checks exporters + writes a Prometheus TSDB"
 	@echo "                          to logs/<job-id>/prometheus; AIC_SMOKE_EXPORTERS=0 skips)"
+	@echo "  make smoke-test-fast   Smoke-test the single-arch dev image (AIC_FAST_ARCH=$(AIC_FAST_ARCH))"
 	@echo "  make tiny-test         End-to-end serve check (MP stack + tiny model, one completion)"
 	@echo "  make install-ci-scripts  Deploy .github/scripts/spur-*.sh to $(AIC_CI_LIB_DIR) (sudo if needed)"
 	@echo "  make cliff-submit      sbatch the full 3-arm cliff sweep -> logs/<job-id>/"
@@ -435,6 +440,11 @@ dist-build:                    # Build image (+ fabric exporters) on a Slurm bui
 	@[ "$(AIC_BUILD_EXPORTERS)" = "0" ] || "$(DIST)" build-exporters \
 	    || echo "WARNING: fabric-exporter build failed (optional; main image is built). Retry on a node with Docker Hub access, or set AIC_BUILD_EXPORTERS=0."
 
+dist-build-fast:               # Single-arch (AIC_FAST_ARCH) dev build -- fast edit-build loop
+	@# A cut-down version of dist-build.
+	@$(MAKE) --no-print-directory dist-build \
+	    AIC_ROCM_ARCH='$(AIC_FAST_ARCH)' AIC_BUILD_EXPORTERS=0 AIC_UCX_FAST=1
+
 dist-build-exporters:          # Build ONLY the fabric exporters (no main-image rebuild)
 	@# Rebuild just the nvme/rdma exporter images -- e.g. after `make dist-build`
 	@# succeeded for the main image but the exporter step failed for lack of Docker
@@ -447,6 +457,12 @@ dist-push:                     # Tag + push the built image to a registry (needs
 
 smoke-test:                    # Load + smoke-test the image on a GPU+NVMe node
 	"$(DIST)" test
+
+smoke-test-fast:               # Smoke-test the single-arch (AIC_FAST_ARCH) dev image
+	@# A cut-down version of smoke-test.
+	@# Must pin the SAME AIC_ROCM_ARCH as dist-build-fast.
+	@$(MAKE) --no-print-directory smoke-test \
+	    AIC_ROCM_ARCH='$(AIC_FAST_ARCH)' AIC_SMOKE_EXPORTERS=0
 
 tiny-test:                     # End-to-end serve check: MP stack + a tiny model, one real completion
 	@# Stages Qwen/Qwen2.5-0.5B-Instruct, brings up the compose MP stack (nvme arm),
