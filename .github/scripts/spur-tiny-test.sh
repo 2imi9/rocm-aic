@@ -16,7 +16,15 @@ set -euo pipefail
 # The tiny model uses the cluster-wide HF cache so it is downloaded once and
 # reused across CI workflows and SPUR accounts.
 
-SHA="${1:?usage: $0 <full-sha>}"
+SHA="${1:?usage: $0 <full-sha> [tiny-test|tiny-test-fast]}"
+AIC_TINY_TEST_TARGET="${2:-tiny-test}"
+case "${AIC_TINY_TEST_TARGET}" in
+    tiny-test | tiny-test-fast) ;;
+    *)
+        echo "ERROR: unsupported tiny-test target: ${AIC_TINY_TEST_TARGET}" >&2
+        exit 2
+        ;;
+esac
 SHORT="${SHA:0:7}"
 AIC_IMAGE="rocm-aic-ci-${SHORT}:latest"
 AIC_SPUR_HOST="${AIC_SPUR_HOST:?AIC_SPUR_HOST must be set (e.g. via GitHub repo variable)}"
@@ -30,6 +38,7 @@ ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=4 "${AIC_SPUR_HOST}" env \
     SHA="${SHA}" \
     REPO="${REPO}" \
     AIC_IMAGE="${AIC_IMAGE}" \
+    AIC_TINY_TEST_TARGET="${AIC_TINY_TEST_TARGET}" \
     AIC_SHARED_NFS="${AIC_SHARED_NFS}" \
     KEEP_ARTIFACTS="${KEEP_ARTIFACTS}" \
     AIC_SPUR_CONTROLLER="${AIC_SPUR_CONTROLLER}" \
@@ -65,14 +74,14 @@ if [[ ! -d "${WORKDIR}" || "${ACTUAL_SHA}" != "${SHA}" ]]; then
     git -C "${WORKDIR}" checkout "${SHA}"
 fi
 
-echo "=== Running tiny-test (AIC_IMAGE=${AIC_IMAGE}) ==="
+echo "=== Running ${AIC_TINY_TEST_TARGET} (AIC_IMAGE=${AIC_IMAGE}) ==="
 AIC_SPUR_CLUSTER=1 \
     AIC_IMAGE="${AIC_IMAGE}" \
     AIC_IMAGE_DIR="${TARBALL_DIR}" \
     HF_TOKEN="${HF_TOKEN:-}" \
-    make -C "${WORKDIR}" tiny-test
+    make -C "${WORKDIR}" "${AIC_TINY_TEST_TARGET}"
 
-echo "=== tiny-test complete ==="
+echo "=== ${AIC_TINY_TEST_TARGET} complete ==="
 REMOTE
 
 echo "Tiny test passed for ${SHORT}"

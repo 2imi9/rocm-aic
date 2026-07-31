@@ -190,7 +190,7 @@ EXPORT_TARBALL ?= $(CURDIR)/$(EXPORT_PREFIX)-$(_GEN_DATE)-$(_GIT_SHORT_REV)$(_GI
         ps shell-lmcache shell-vllm restart-vllm restart-lmcache cliff plot venv \
         monitoring-up monitoring-down monitoring-logs monitoring-build-exporters \
         dist-build dist-build-fast dist-build-exporters dist-push smoke-test smoke-test-fast \
-        tiny-test install-ci-scripts cliff-submit cliff-short \
+        tiny-test tiny-test-fast install-ci-scripts cliff-submit cliff-short \
         cliff-long-64k cliff-long-128k \
         export _check_hf_token _prep_dirs _check_gds_slab
 
@@ -232,6 +232,7 @@ help:
 	@echo "                          to logs/<job-id>/prometheus; AIC_SMOKE_EXPORTERS=0 skips)"
 	@echo "  make smoke-test-fast   Smoke-test the single-arch dev image (AIC_FAST_ARCH=$(AIC_FAST_ARCH))"
 	@echo "  make tiny-test         End-to-end serve check (MP stack + tiny model, one completion)"
+	@echo "  make tiny-test-fast    Fast variant of tiny-test"
 	@echo "  make install-ci-scripts  Deploy .github/scripts/spur-*.sh to $(AIC_CI_LIB_DIR) (sudo if needed)"
 	@echo "  make cliff-submit      sbatch the full 3-arm cliff sweep -> logs/<job-id>/"
 	@echo "  make cliff-short       sbatch a 1-point cliff (concur=1, 1 iter) to smoke-test the flow"
@@ -469,6 +470,11 @@ tiny-test:                     # End-to-end serve check: MP stack + a tiny model
 	@# waits for the endpoint, and asserts one non-empty chat completion.  Fast
 	@# functional gate that exercises the connector path a smoke-test cannot.
 	"$(DIST)" tiny-test
+
+tiny-test-fast:
+	@# Must pin the SAME AIC_ROCM_ARCH as dist-build-fast and smoke-test-fast.
+	@$(MAKE) --no-print-directory tiny-test \
+	    AIC_ROCM_ARCH='$(AIC_FAST_ARCH)'
 
 install-ci-scripts:            # Deploy .github/scripts/spur-*.sh to the runner's AIC_CI_LIB_DIR
 	@set -e; \

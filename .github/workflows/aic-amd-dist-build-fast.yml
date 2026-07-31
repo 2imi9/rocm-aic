@@ -248,8 +248,8 @@ jobs:
               description: 'Running tiny-model end-to-end serve on SPUR head node...',
             });
 
-      - name: Run tiny-test on SPUR head node
-        run: bash /usr/local/lib/aic-ci/spur-tiny-test.sh "${{ needs.authorize.outputs.sha }}"
+      - name: Run fast tiny-test on SPUR head node
+        run: bash /usr/local/lib/aic-ci/spur-tiny-test.sh "${{ needs.authorize.outputs.sha }}" tiny-test-fast
 
       - name: Set commit status on success
         if: success() && needs.authorize.outputs.pr_number != ''
