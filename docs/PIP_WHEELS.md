@@ -31,6 +31,7 @@ These wheels are a convenience for reproducing the stack outside the
 container; the supported deployment is still the Docker image built below.
 
 > The wheels are produced by the `wheels` stage of the Dockerfile
-> (`docker build --target wheels --output type=local,dest=./wheels`);
+> (`docker build --build-arg AIC_VERSION="$(<VERSION)" --target wheels
+> --output type=local,dest=./wheels`);
 > the default build target is unchanged and still yields the full runtime
 > image.

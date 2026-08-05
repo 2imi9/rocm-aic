@@ -123,6 +123,14 @@ jobs:
 
       - uses: docker/setup-buildx-action@v3
 
+      - name: Read AIC version
+        id: version
+        run: |
+          set -euo pipefail
+          aic_version="$(<VERSION)"
+          : "${aic_version:?VERSION is empty}"
+          echo "aic_version=${aic_version}" >> "${GITHUB_OUTPUT}"
+
       # Corp CA cert (AMD Zscaler) as a BuildKit secret, only if the secret is
       # set.  Never written into any image layer.  Same pattern as the Docker
       # build workflow.
@@ -149,6 +157,7 @@ jobs:
           target: wheels
           outputs: type=local,dest=wheels
           build-args: |
+            AIC_VERSION=${{ steps.version.outputs.aic_version }}
             ROCM_ARCH=${{ env.ROCM_ARCH }}
           secrets: |
             ${{ steps.cert.outputs.present == 'true' && format('tls_cert={0}', steps.cert.outputs.path) || '' }}
@@ -173,15 +182,21 @@ jobs:
           set -euo pipefail
           df="docker/Dockerfile"
           get() { grep -E "^ARG $1=" "$df" | head -1 | cut -d= -f2-; }
+          lmcache_ref="$(get LMCACHE_REF)"
+          nixl_ref="$(get NIXL_REF)"
+          rocm_version="$(get ROCM_VERSION)"
+          : "${lmcache_ref:?LMCACHE_REF is not set in ${df}}"
+          : "${nixl_ref:?NIXL_REF is not set in ${df}}"
+          : "${rocm_version:?ROCM_VERSION is not set in ${df}}"
           {
             echo "Nightly ROCm wheels for the **AMD Infinity Context (AIC)** patched stack."
             echo ""
             echo "- **Source:** main @ \`${{ needs.check.outputs.sha }}\`"
             echo "- **Built (UTC):** ${{ github.run_id }} / ${GITHUB_SHA}"
             echo "- **GPU arch set:** \`${ROCM_ARCH}\`"
-            echo "- **Base:** rocm/dev-ubuntu-24.04:7.2.4-complete (ROCm 7.2.4, Python 3.12, x86_64)"
-            echo "- **LMCache:** $(get LMCACHE_GIT_URL) @ \`$(get LMCACHE_SHA)\` + AIC patches"
-            echo "- **NIXL:** $(get NIXL_GIT_URL) @ \`$(get NIXL_SHA)\` + nixl-rocm-ais-mt patch"
+            echo "- **Base:** rocm/dev-ubuntu-24.04:${rocm_version}-complete (ROCm ${rocm_version}, Python 3.12, x86_64)"
+            echo "- **LMCache:** $(get LMCACHE_GIT_URL) @ \`${lmcache_ref}\` + AIC patches"
+            echo "- **NIXL:** $(get NIXL_GIT_URL) @ \`${nixl_ref}\` + nixl-rocm-ais-mt patch"
             echo ""
             echo "### Install"
             echo '```bash'

@@ -71,10 +71,14 @@
 #
 # Key environment:
 #   AIC_ROCM_ARCH        gfx arch(es) baked in; ';'-list   (default: all vLLM archs)
-#   AIC_IMAGE            image name:tag                    (default: rocm-aic:latest)
+#   AIC_IMAGE            full image name:tag
+#   AIC_IMAGE_NAME       image name only
 #   AIC_IMAGE_DIR        shared dir for the tarball        (default: /scratch/$USER/images)
 #   HF_HOME              persistent Hugging Face cache used by tiny-test
 #                        (default: <AIC_IMAGE_DIR>/tiny-hf)
+#   ROCM_VERSION, VLLM_VERSION, VLLM_ROCM_VARIANT, LMCACHE_REF,
+#   NIXL_REF, HIPFILE_SHA, HSA_SNOOP_REF
+#                        optional Docker build-arg overrides.
 #   AIC_FORCE_LOAD       test/push: force a reload from the tarball even when the
 #                        node's image is already current (default: 0).  By default
 #                        a node auto-reloads only when the /scratch tarball is
@@ -153,6 +157,11 @@ set -euo pipefail
 # The tree is self-contained: the Docker build context IS aic-release/.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 AIC_DAY_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+[[ -s "${AIC_DAY_DIR}/VERSION" ]] || {
+    printf '[build-distribute] ERROR: VERSION is missing or empty\n' >&2
+    exit 1
+}
+AIC_VERSION="$(<"${AIC_DAY_DIR}/VERSION")"
 
 # --- Defaults ----------------------------------------------------------------
 # Multi-arch by default: every gfx the vLLM ROCm wheel ships kernels for.
@@ -163,7 +172,16 @@ AIC_DAY_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 # to the CDNA set "gfx90a;gfx942;gfx950".  Override via AIC_ROCM_ARCH.
 AIC_ROCM_ARCH="${AIC_ROCM_ARCH:-gfx90a;gfx942;gfx950;gfx1100;gfx1101;gfx1150;gfx1151;gfx1200;gfx1201}"
 AIC_UCX_FAST="${AIC_UCX_FAST:-}"
-AIC_IMAGE="${AIC_IMAGE:-rocm-aic:latest}"
+# Default the image ref to the version-derived tag (see docker/scripts/aic-image-tag.sh)
+# so the saved tarball, load, push, and the cliff's tarball glob all agree on the
+# same name without hardcoding a version here.  Falls back to :latest if the helper
+# can't resolve the pins.
+#
+# Callers must pass one of:
+#   AIC_IMAGE_NAME  name only for the version-derived tag to be appended here.
+#   AIC_IMAGE       a complete name:tag, used verbatim.  Wins over AIC_IMAGE_NAME.
+_aic_tag="$(bash "${AIC_DAY_DIR}/docker/scripts/aic-image-tag.sh" 2>/dev/null || true)"
+AIC_IMAGE="${AIC_IMAGE:-${AIC_IMAGE_NAME:-rocm-aic}:${_aic_tag:-latest}}"
 AIC_IMAGE_DIR="${AIC_IMAGE_DIR:-/scratch/${USER}/images}"
 AIC_SPUR_CLUSTER="${AIC_SPUR_CLUSTER:-0}"
 AIC_SPUR_CONTROLLER="${AIC_SPUR_CONTROLLER:-${SPUR_CONTROLLER_ADDR:?set SPUR_CONTROLLER_ADDR or AIC_SPUR_CONTROLLER before using AIC_SPUR_CLUSTER=1}}"
@@ -348,15 +366,26 @@ PROLOGUE
             fi
         }
 
+        # SPUR ignores -j and may return a large queue.  Consume all of squeue's
+        # output before deciding whether the job is present: an early-exiting
+        # grep -q closes the pipe and makes squeue fail with SIGPIPE under
+        # pipefail, which looks like the job disappeared.
+        _spur_job_is_queued() {
+            squeue --controller="${AIC_SPUR_CONTROLLER}" -j "${jobid}" -h 2>/dev/null |
+                awk -v id="${jobid}" '
+                    $1 == id { found = 1 }
+                    END { exit found ? 0 : 1 }
+                '
+        }
+
         # Wait up to 60s for the job to appear.
         local appear_tries=0
-        until squeue --controller="${AIC_SPUR_CONTROLLER}" -j "${jobid}" -h 2>/dev/null | awk '{print $1}' | grep -qx "${jobid}" \
-              || (( appear_tries >= 60 )); do
+        until _spur_job_is_queued || (( appear_tries >= 60 )); do
             sleep 1; appear_tries=$((appear_tries + 1))
         done
 
         # Poll until the job leaves the queue, streaming new log lines.
-        while squeue --controller="${AIC_SPUR_CONTROLLER}" -j "${jobid}" -h 2>/dev/null | awk '{print $1}' | grep -qx "${jobid}"; do
+        while _spur_job_is_queued; do
             _print_new_lines
             sleep 10
         done
@@ -383,7 +412,14 @@ PROLOGUE
         else
             acct_exit="$(sacct --controller="${AIC_SPUR_CONTROLLER}" -j "${jobid}" \
                 --format=JobID,ExitCode --noheader 2>/dev/null \
-                | awk -v id="${jobid}" '$1==id{split($2,a,":"); print a[1]; exit}')"
+                | awk -v id="${jobid}" '
+                    $1 == id && !found {
+                        split($2, fields, ":")
+                        code = fields[1]
+                        found = 1
+                    }
+                    END { if (found) print code }
+                ')"
             log "exit code from sacct: ${acct_exit:-<empty>} (job ${jobid})"
         fi
         rc="${acct_exit:-1}"
@@ -436,6 +472,20 @@ PROLOGUE
 cmd_build() {
     _pick_compress
     local tarball; tarball="$(_tarball_path)"
+    # Alias ref (name:latest) built + saved alongside the versioned ref.
+    local latest_ref="${AIC_IMAGE%:*}:latest"
+    # Forward every version override for Docker tag naming.
+    local _version_build_args="" _version_arg _version_value
+    printf -v _version_value '%q' "${AIC_VERSION}"
+    _version_build_args+=" --build-arg AIC_VERSION=${_version_value}"
+    for _version_arg in \
+        ROCM_VERSION VLLM_VERSION VLLM_ROCM_VARIANT \
+        LMCACHE_REF NIXL_REF HIPFILE_SHA HSA_SNOOP_REF; do
+        if [[ -v "${_version_arg}" ]]; then
+            printf -v _version_value '%q' "${!_version_arg}"
+            _version_build_args+=" --build-arg ${_version_arg}=${_version_value}"
+        fi
+    done
 
     log "image      : ${AIC_IMAGE}  (arch ${AIC_ROCM_ARCH})"
     log "tarball    : ${tarball}  (compress: ${AIC_COMPRESS})"
@@ -537,10 +587,12 @@ tmp="${tarball}.partial.\$\$"
 docker buildx build --builder ${AIC_BUILDX_BUILDER} --progress=plain --output type=docker,dest=- \
     --build-arg ROCM_ARCH="${AIC_ROCM_ARCH}" \
     --build-arg AIC_UCX_FAST="${AIC_UCX_FAST}" \
+    ${_version_build_args} \
     ${_secret_arg} \
     ${_cache_args} \
     -f "${AIC_DAY_DIR}/docker/Dockerfile" \
     -t "${AIC_IMAGE}" \
+    -t "${latest_ref}" \
     "${AIC_DAY_DIR}" | ${COMPRESS_CMD} > "\${tmp}"
 mv -f "\${tmp}" "${tarball}"
 echo "[build] saved \$(du -h "${tarball}" | cut -f1) -> ${tarball}"
@@ -559,15 +611,17 @@ ${_builder_setup}
 ${_build_program} \
     --build-arg ROCM_ARCH="${AIC_ROCM_ARCH}" \
     --build-arg AIC_UCX_FAST="${AIC_UCX_FAST}" \
+    ${_version_build_args} \
     ${_secret_arg} \
     ${_cache_args} \
     -f "${AIC_DAY_DIR}/docker/Dockerfile" \
     -t "${AIC_IMAGE}" \
+    -t "${latest_ref}" \
     "${AIC_DAY_DIR}"
 echo "[build] built ${AIC_IMAGE}"
 mkdir -p "${AIC_IMAGE_DIR}"
 tmp="${tarball}.partial.\$\$"
-docker save "${AIC_IMAGE}" | ${COMPRESS_CMD} > "\${tmp}"
+docker save "${AIC_IMAGE}" "${latest_ref}" | ${COMPRESS_CMD} > "\${tmp}"
 mv -f "\${tmp}" "${tarball}"
 echo "[build] saved \$(du -h "${tarball}" | cut -f1) -> ${tarball}"
 REMOTE
@@ -1073,7 +1127,8 @@ ensure_compose || { echo "[tiny-test] docker compose unavailable and could not b
 
 # Tiny-model MP stack env.  Small footprint; the tiny model is downloaded online
 # into the persistent HF_HOME forwarded by the Makefile.
-export IMAGE_NAME='${AIC_IMAGE}'
+export IMAGE_REF='${AIC_IMAGE}'
+export IMAGE_NAME='${AIC_IMAGE%:*}'
 export ROCM_ARCH='${AIC_ROCM_ARCH}'
 export GPU=0
 export VLLM_MODEL='${AIC_TINY_MODEL}'

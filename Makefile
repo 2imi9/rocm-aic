@@ -11,6 +11,16 @@ NIXL_GIT_URL := https://github.com/ai-dynamo/nixl.git
 NIXL_SHA     := v1.3.2
 
 IMAGE_NAME ?= rocm-aic
+override AIC_VERSION := $(strip $(file <$(REPO_ROOT)/VERSION))
+
+_FRAMEWORK_VERSION_ARGS := AIC_VERSION ROCM_VERSION VLLM_VERSION VLLM_ROCM_VARIANT LMCACHE_REF NIXL_REF HIPFILE_SHA HSA_SNOOP_REF
+_single_quote := '
+_shell_quote = '$(subst $(_single_quote),'"'"',$(1))'
+_FRAMEWORK_VERSION_ENV := $(foreach _arg,$(_FRAMEWORK_VERSION_ARGS),$(if $(filter undefined,$(origin $(_arg))),,$(_arg)=$(call _shell_quote,$(value $(_arg)))))
+
+_IMAGE_TAG := $(shell $(_FRAMEWORK_VERSION_ENV) $(REPO_ROOT)/docker/scripts/aic-image-tag.sh 2>/dev/null)
+IMAGE_TAG  ?= $(if $(_IMAGE_TAG),$(_IMAGE_TAG),latest)
+IMAGE_REF  := $(IMAGE_NAME):$(IMAGE_TAG)
 
 # ---- GPU -------------------------------------------------------------------
 GPU ?= 0
@@ -60,7 +70,7 @@ ROCM_ARCH := $(if $(strip $(ROCM_ARCH)),$(strip $(ROCM_ARCH)),$(_ROCM_ARCH_DETEC
 # Caps parallel compile jobs in the image build, Empty = use all cores ($(nproc)).
 BUILD_JOBS ?=
 
-export ROCM_ARCH GPU GDS_SLAB_DATA LOG HF_HOME HF_TOKEN IMAGE_NAME BUILD_JOBS
+export AIC_VERSION ROCM_ARCH GPU GDS_SLAB_DATA LOG HF_HOME HF_TOKEN IMAGE_NAME IMAGE_REF IMAGE_TAG BUILD_JOBS
 export LMCACHE_PORT LMCACHE_L1_SIZE_GB LMCACHE_NVME_POOL LMCACHE_NVME_SLOT_SIZE LMCACHE_NFS_POOL
 export NVME_DATA NFS_DATA
 export VLLM_MODEL TENSOR_PARALLEL_SIZE
@@ -72,7 +82,7 @@ comma := ,
 # and the old docker-run sidecar fallbacks are gone.  `make ensure-compose` installs
 # the v2 plugin into ~/.docker/cli-plugins (shared $HOME) on nodes that lack it.
 _COMPOSE_BIN := docker compose
-COMPOSE      := DOCKER_BUILDKIT=1 $(_COMPOSE_BIN) -f "$(CURDIR)/docker/docker-compose.yml"
+COMPOSE      := $(_FRAMEWORK_VERSION_ENV) DOCKER_BUILDKIT=1 $(_COMPOSE_BIN) -f "$(CURDIR)/docker/docker-compose.yml"
 # The lmcache service lives behind the `cache` profile; the interactive stack and
 # the cliff kvd arms enable it, the plain vram baseline does not.
 COMPOSE_CACHE := $(COMPOSE) --profile cache
@@ -201,7 +211,7 @@ help:
 	@echo ""
 	@echo "Stack targets:"
 	@echo "  make ensure-compose    Install the docker compose v2 plugin if missing (user-local)"
-	@echo "  make build             Build the shared image ($(IMAGE_NAME))"
+	@echo "  make build             Build the shared image ($(IMAGE_REF))"
 	@echo "  make up                Start lmcache + vllm (foreground, DRAM L1 + AIS_MT/NFS L2)"
 	@echo "  make up-batch          Start lmcache + vllm (background)"
 	@echo "  make up-gds-l1         Start with hipFile GDS NVMe slab as L1 (foreground)"
@@ -329,6 +339,8 @@ build: ensure-compose
 		echo "ERROR: ROCM_ARCH empty (install ROCm or set ROCM_ARCH=gfxNNNN)" >&2; exit 1; }
 	cd "$(REPO_ROOT)" && $(COMPOSE_CACHE) build \
 		$(if $(TLS_CERT),--secret id=tls_cert$(comma)src=$(TLS_CERT),)
+	@docker tag "$(IMAGE_REF)" "$(IMAGE_NAME):latest"
+	@echo "Built $(IMAGE_REF) (also tagged $(IMAGE_NAME):latest)"
 
 up: ensure-compose _check_hf_token _prep_dirs
 	$(COMPOSE_CACHE) up
