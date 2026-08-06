@@ -45,6 +45,40 @@ jobs:
           echo "tarball=${tarball}" >> "${GITHUB_OUTPUT}"
           echo "Built ${tarball}"
 
+      - name: Validate image tag helper
+        run: |
+          set -euo pipefail
+
+          default_tag="$(bash docker/scripts/aic-image-tag.sh)"
+          test -n "${default_tag}" \
+            || { echo "ERROR: image tag helper returned an empty tag" >&2; exit 1; }
+          aic_version="$(< VERSION)"
+          : "${aic_version:?VERSION is missing or empty}"
+          [[ "${default_tag}" == "${aic_version}-"* ]] \
+            || {
+              echo "ERROR: tag ${default_tag} does not start with VERSION ${aic_version}" >&2
+              exit 1
+            }
+
+          override_tag="$(
+            ROCM_VERSION=8.7.6 \
+            VLLM_VERSION=1.2.3 \
+            VLLM_ROCM_VARIANT=rocm876 \
+            LMCACHE_REF=v2.3.4 \
+            NIXL_REF=v3.4.5 \
+            HIPFILE_SHA=abcdef1234567890 \
+            HSA_SNOOP_REF=v4.5.6 \
+              bash docker/scripts/aic-image-tag.sh
+          )"
+          expected_override="${aic_version}-rocm8.7.6-vllm1.2.3-rocm876-lmcache2.3.4-nixl3.4.5-hipfileabcdef1-hsasnoop4.5.6"
+          [[ "${override_tag}" == "${expected_override}" ]] \
+            || {
+              echo "ERROR: expected ${expected_override}, got ${override_tag}" >&2
+              exit 1
+            }
+          echo "Default tag: ${default_tag}"
+          echo "Override tag: ${override_tag}"
+
       - name: Validate tarball contents
         run: |
           set -euo pipefail
@@ -64,7 +98,8 @@ jobs:
 
           # Sources needed to actually run the tooling must be present.
           tarball_contents="$(tar tzf "${tarball}")"
-          for f in Makefile README.md pyproject.toml \
+          for f in Makefile README.md VERSION pyproject.toml \
+                   docker/scripts/aic-image-tag.sh \
                    benchmarks/run_cliff.py benchmarks/plot_cliff.py; do
             echo "${tarball_contents}" | grep -q "${f}" \
               || { echo "ERROR: expected ${f} missing from tarball" >&2; exit 1; }

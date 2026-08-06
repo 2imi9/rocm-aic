@@ -27,19 +27,21 @@ set -euo pipefail
 SHA="${1:?usage: $0 <full-sha> [run-date]}"
 RUN_DATE="${2:-$(date +%Y-%m-%d)}"
 SHORT="${SHA:0:7}"
-AIC_IMAGE="rocm-aic-ci-${SHORT}:latest"
+AIC_IMAGE_NAME="rocm-aic-ci-${SHORT}"
 AIC_SPUR_HOST="${AIC_SPUR_HOST:?AIC_SPUR_HOST must be set (e.g. via GitHub repo variable)}"
 AIC_SPUR_HOST="${AIC_SPUR_HOST//[$'\t\r\n ']}"
 AIC_SHARED_NFS="${AIC_SHARED_NFS:?AIC_SHARED_NFS must be set (e.g. via GitHub repo variable)}"
 AIC_SPUR_CONTROLLER="${AIC_SPUR_CONTROLLER:?AIC_SPUR_CONTROLLER must be set (e.g. via GitHub repo variable)}"
+AIC_CI_STORAGE_ROOT="${AIC_CI_STORAGE_ROOT:-}"
 REPO="https://github.com/ROCm/rocm-aic.git"
 
 ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=4 "${AIC_SPUR_HOST}" env \
     SHA="${SHA}" \
     REPO="${REPO}" \
     RUN_DATE="${RUN_DATE}" \
-    AIC_IMAGE="${AIC_IMAGE}" \
+    AIC_IMAGE_NAME="${AIC_IMAGE_NAME}" \
     AIC_SHARED_NFS="${AIC_SHARED_NFS}" \
+    AIC_CI_STORAGE_ROOT="${AIC_CI_STORAGE_ROOT}" \
     AIC_SPUR_CONTROLLER="${AIC_SPUR_CONTROLLER}" \
     SPUR_CONTROLLER_ADDR="${AIC_SPUR_CONTROLLER}" \
     bash << 'REMOTE'
@@ -47,8 +49,8 @@ set -euo pipefail
 
 SHORT="${SHA:0:7}"
 WORKDIR="$HOME/Projects/rocm-aic.${SHORT}"
-# $USER here is the head-node user — define paths here, not on the runner.
-TARBALL_DIR="${AIC_SHARED_NFS}/${USER}/images/aic-ci-${SHORT}"
+CI_STORAGE_ROOT="${AIC_CI_STORAGE_ROOT:-$HOME/Projects/rocm-aic-ci}"
+TARBALL_DIR="${CI_STORAGE_ROOT}/images/aic-ci-${SHORT}"
 CLIFF_STAGING_DIR="${AIC_SHARED_NFS}/${USER}/cliff-results-${SHORT}"
 
 cleanup() {
@@ -80,10 +82,10 @@ fi
 # ---------------------------------------------------------------------------
 # Submit the cliff job and poll for completion
 # ---------------------------------------------------------------------------
-echo "=== Submitting cliff-submit job (AIC_IMAGE=${AIC_IMAGE}) ==="
+echo "=== Submitting cliff-submit job (AIC_IMAGE_NAME=${AIC_IMAGE_NAME}) ==="
 JOB_ID=$(SPUR_CONTROLLER_ADDR="${AIC_SPUR_CONTROLLER}" \
     AIC_SPUR_CLUSTER=1 \
-    AIC_IMAGE="${AIC_IMAGE}" \
+    AIC_IMAGE_NAME="${AIC_IMAGE_NAME}" \
     AIC_IMAGE_DIR="${TARBALL_DIR}" \
     make cliff-submit 2>&1 \
   | grep -oE '(submitted (cliff-short|aic-cliff) job |Submitted batch job )[0-9]+' \
@@ -96,7 +98,8 @@ fi
 
 echo "=== Cliff job ${JOB_ID} submitted — polling for completion ==="
 
-while squeue -j "${JOB_ID}" -h 2>/dev/null | grep -q "${JOB_ID}"; do
+while squeue -j "${JOB_ID}" -h 2>/dev/null |
+    awk -v id="${JOB_ID}" '$1 == id { found = 1 } END { exit found ? 0 : 1 }'; do
     sleep 30
 done
 

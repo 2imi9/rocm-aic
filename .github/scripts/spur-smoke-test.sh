@@ -17,19 +17,21 @@ case "${AIC_SMOKE_TEST_TARGET}" in
         ;;
 esac
 SHORT="${SHA:0:7}"
-AIC_IMAGE="rocm-aic-ci-${SHORT}:latest"
+AIC_IMAGE_NAME="rocm-aic-ci-${SHORT}"
 AIC_SPUR_HOST="${AIC_SPUR_HOST:?AIC_SPUR_HOST must be set (e.g. via GitHub repo variable)}"
 AIC_SPUR_HOST="${AIC_SPUR_HOST//[$'\t\r\n ']}"
 AIC_SHARED_NFS="${AIC_SHARED_NFS:?AIC_SHARED_NFS must be set (e.g. via GitHub repo variable)}"
 AIC_SPUR_CONTROLLER="${AIC_SPUR_CONTROLLER:?AIC_SPUR_CONTROLLER must be set (e.g. via GitHub repo variable)}"
+AIC_CI_STORAGE_ROOT="${AIC_CI_STORAGE_ROOT:-}"
 REPO="https://github.com/ROCm/rocm-aic.git"
 
 ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=4 "${AIC_SPUR_HOST}" env \
     SHA="${SHA}" \
     REPO="${REPO}" \
-    AIC_IMAGE="${AIC_IMAGE}" \
+    AIC_IMAGE_NAME="${AIC_IMAGE_NAME}" \
     AIC_SMOKE_TEST_TARGET="${AIC_SMOKE_TEST_TARGET}" \
     AIC_SHARED_NFS="${AIC_SHARED_NFS}" \
+    AIC_CI_STORAGE_ROOT="${AIC_CI_STORAGE_ROOT}" \
     AIC_SPUR_CONTROLLER="${AIC_SPUR_CONTROLLER}" \
     SPUR_CONTROLLER_ADDR="${AIC_SPUR_CONTROLLER}" \
     bash << 'REMOTE'
@@ -37,7 +39,8 @@ set -euo pipefail
 
 SHORT="${SHA:0:7}"
 WORKDIR="$HOME/Projects/rocm-aic.${SHORT}"
-TARBALL_DIR="${AIC_SHARED_NFS}/rocm-aic/images/aic-ci-${SHORT}"
+CI_STORAGE_ROOT="${AIC_CI_STORAGE_ROOT:-$HOME/Projects/rocm-aic-ci}"
+TARBALL_DIR="${CI_STORAGE_ROOT}/images/aic-ci-${SHORT}"
 
 cleanup_on_fail() {
     echo "=== Smoke test failed — cleaning up ==="
@@ -57,9 +60,9 @@ if [[ ! -d "${WORKDIR}" || "${ACTUAL_SHA}" != "${SHA}" ]]; then
     git -C "${WORKDIR}" checkout "${SHA}"
 fi
 
-echo "=== Running ${AIC_SMOKE_TEST_TARGET} (AIC_IMAGE=${AIC_IMAGE}) ==="
+echo "=== Running ${AIC_SMOKE_TEST_TARGET} (AIC_IMAGE_NAME=${AIC_IMAGE_NAME}) ==="
 AIC_SPUR_CLUSTER=1 \
-    AIC_IMAGE="${AIC_IMAGE}" \
+    AIC_IMAGE_NAME="${AIC_IMAGE_NAME}" \
     AIC_IMAGE_DIR="${TARBALL_DIR}" \
     make -C "${WORKDIR}" "${AIC_SMOKE_TEST_TARGET}"
 

@@ -96,10 +96,11 @@ REPO="${SLURM_SUBMIT_DIR:-$(cd "${SCRIPT_DIR}/.." && pwd)}"
 LOGDIR_REL="logs/${SLURM_JOB_ID:-manual}"
 LOGDIR="${REPO}/${LOGDIR_REL}"
 if mkdir -p "${LOGDIR}" 2>/dev/null; then
-    exec >>"${LOGDIR}/cliff.out" 2>&1
+  exec >>"${LOGDIR}/cliff.out" 2>&1
 fi
 
-AIC_IMAGE="${AIC_IMAGE:-rocm-aic:latest}"
+_aic_tag="$(bash "${REPO}/docker/scripts/aic-image-tag.sh" 2>/dev/null || true)"
+AIC_IMAGE="${AIC_IMAGE:-${AIC_IMAGE_NAME:-rocm-aic}:${_aic_tag:-latest}}"
 AIC_IMAGE_DIR="${AIC_IMAGE_DIR:-/scratch/${USER}/images}"
 # Model selection.  Leave VLLM_MODEL empty to auto-pick a default from the node's
 # detected GPU arch (select_default_model(), below): gpt-oss-120b (~60 GB MXFP4)
@@ -109,8 +110,8 @@ AIC_IMAGE_DIR="${AIC_IMAGE_DIR:-/scratch/${USER}/images}"
 # honored as-is (no arch check).  Both tier defaults are overridable and MUST be
 # pre-staged in HF_HOME (offline): AIC_MODEL_BIG / AIC_MODEL_SMALL.
 VLLM_MODEL="${VLLM_MODEL:-}"
-AIC_MODEL_BIG="${AIC_MODEL_BIG:-openai/gpt-oss-120b}"            # >=128 GB HBM CDNA (gfx942/gfx950)
-AIC_MODEL_SMALL="${AIC_MODEL_SMALL:-Qwen/Qwen2.5-3B-Instruct}"  # small-VRAM parts (staged in the shared HF cache)
+AIC_MODEL_BIG="${AIC_MODEL_BIG:-openai/gpt-oss-120b}"          # >=128 GB HBM CDNA (gfx942/gfx950)
+AIC_MODEL_SMALL="${AIC_MODEL_SMALL:-Qwen/Qwen2.5-3B-Instruct}" # small-VRAM parts (staged in the shared HF cache)
 # Shared HF cache that already holds gpt-oss-120b + Qwen2.5-3B; offline so no token.
 HF_HOME="${HF_HOME:-/scratch/${USER}/vllm-lmcache-hipfile/hf}"
 
@@ -119,8 +120,8 @@ HF_HOME="${HF_HOME:-/scratch/${USER}/vllm-lmcache-hipfile/hf}"
 # provision_storage() (below, once log() exists) finalizes the paths.  An
 # explicit NVME_DATA / AIC_LOCAL_ROOT is always honored as-is.
 AIC_NVME_AUTO="${AIC_NVME_AUTO:-1}"
-AIC_NVME_MOUNT="${AIC_NVME_MOUNT:-/mnt/aic-lmcache}"   # where a provisioned spare is mounted
-AIC_NVME_LABEL="${AIC_NVME_LABEL:-aic-lmcache}"        # ext4 label to recognize/reuse our fs
+AIC_NVME_MOUNT="${AIC_NVME_MOUNT:-/mnt/aic-lmcache}" # where a provisioned spare is mounted
+AIC_NVME_LABEL="${AIC_NVME_LABEL:-aic-lmcache}"      # ext4 label to recognize/reuse our fs
 _AIC_NVME_DATA_PINNED="${NVME_DATA:+1}"
 _AIC_LOCAL_ROOT_PINNED="${AIC_LOCAL_ROOT:+1}"
 
@@ -129,7 +130,7 @@ BENCH_ISL="${BENCH_ISL:-20000}"
 BENCH_SHARED_TOK="${BENCH_SHARED_TOK:-18000}"
 BENCH_CONCUR="${BENCH_CONCUR:-1,2,4,8,16,32,48,64,80,100,128,160,200,250}"
 BENCH_ITERS="${BENCH_ITERS:-3}"
-BENCH_PREFIX_MODE="${BENCH_PREFIX_MODE:-per_client}"  # per_client => a real cliff
+BENCH_PREFIX_MODE="${BENCH_PREFIX_MODE:-per_client}" # per_client => a real cliff
 
 # Arm selector: comma list of arms to run (vram, nvme, gds).  Default all three;
 # narrow it for a quick check, e.g. `make cliff-submit AIC_CLIFF_ARMS=nvme`.
@@ -154,7 +155,7 @@ VLM_YARN_FACTOR="${VLM_YARN_FACTOR:-}"
 VLM_YARN_ORIG_LEN="${VLM_YARN_ORIG_LEN:-32768}"
 # Build the optional --hf-overrides arg once (empty array when no scaling asked).
 if [[ -z "${VLM_ROPE_SCALING}" && -n "${VLM_YARN_FACTOR}" ]]; then
-    VLM_ROPE_SCALING="{\"rope_type\":\"yarn\",\"factor\":${VLM_YARN_FACTOR},\"original_max_position_embeddings\":${VLM_YARN_ORIG_LEN}}"
+  VLM_ROPE_SCALING="{\"rope_type\":\"yarn\",\"factor\":${VLM_YARN_FACTOR},\"original_max_position_embeddings\":${VLM_YARN_ORIG_LEN}}"
 fi
 # The RoPE override is passed to every arm through the compose ${VLLM_EXTRA_ARGS}
 # knob (built in the compose-stack setup block below).  Empty => no scaling.
@@ -201,15 +202,15 @@ AIC_L2_BACKEND="${AIC_L2_BACKEND:-nixl}"
 # (requires cpu buffer).  AIC_L2_BACKEND=nixl_posix forces POSIX + cpu buffer below.
 AIC_NIXL_BACKEND="${AIC_NIXL_BACKEND:-AIS_MT}"
 # local_disk L2 knobs (only used when AIC_L2_BACKEND=local_disk):
-AIC_LOCAL_DISK_SIZE_GB="${AIC_LOCAL_DISK_SIZE_GB:-320}"   # max_local_disk_size (GB)
+AIC_LOCAL_DISK_SIZE_GB="${AIC_LOCAL_DISK_SIZE_GB:-320}" # max_local_disk_size (GB)
 # use_odirect=false -> buffered I/O through the PAGE CACHE (page cache acts as a fast
 # second tier); true -> O_DIRECT (bypass page cache, needs block-aligned chunks).
 AIC_L2_ODIRECT="${AIC_L2_ODIRECT:-false}"
 # nixl_posix is shorthand for the NIXL first-class POSIX plugin: normalize it here (at
 # top level) to POSIX + cpu buffer so the tiers log and the config writer agree.
 if [[ "${AIC_L2_BACKEND}" == nixl_posix ]]; then
-    AIC_NIXL_BACKEND=POSIX
-    AIC_NIXL_BUFFER_DEVICE=cpu
+  AIC_NIXL_BACKEND=POSIX
+  AIC_NIXL_BUFFER_DEVICE=cpu
 fi
 # Attention backend for all arms.  On vLLM 0.25 the ROCm backends (ROCM_ATTN,
 # ROCM_AITER_UNIFIED_ATTN) report supports_kv_connector()=False, so the kvd arms
@@ -259,93 +260,112 @@ MON_COMPOSE="${REPO}/monitoring/docker-compose.monitoring.yml"
 MON_DIR="${REPO}/monitoring"
 
 log() { printf '[cliff-job] %s\n' "$*" >&2; }
-die() { printf '[cliff-job] ERROR: %s\n' "$*" >&2; exit 1; }
+die() {
+  printf '[cliff-job] ERROR: %s\n' "$*" >&2
+  exit 1
+}
 
 # --- Dedicated-NVMe auto-detection (see the storage note near the top) --------
 # The disk backing / (e.g. nvme0n1); used to exclude the root disk everywhere.
 _root_disk() {
-    local src; src="$(findmnt -no SOURCE / 2>/dev/null)"
-    [[ -n "${src}" ]] || return 0
-    local pk; pk="$(lsblk -no PKNAME "${src}" 2>/dev/null | head -1)"
-    printf '%s\n' "${pk:-$(basename "${src}")}"
+  local src
+  src="$(findmnt -no SOURCE / 2>/dev/null)"
+  [[ -n "${src}" ]] || return 0
+  local pk
+  pk="$(lsblk -no PKNAME "${src}" 2>/dev/null | head -1)"
+  printf '%s\n' "${pk:-$(basename "${src}")}"
 }
 
 # Echo a base directory on a dedicated local NVMe (or nothing -> caller uses
 # /tmp).  Logs go to stderr so stdout carries only the chosen path.
 _detect_or_provision_nvme() {
-    command -v lsblk   >/dev/null 2>&1 || { log "  nvme-auto: lsblk missing; using /tmp" >&2; return 0; }
-    command -v findmnt >/dev/null 2>&1 || { log "  nvme-auto: findmnt missing; using /tmp" >&2; return 0; }
-    local rootdev; rootdev="$(_root_disk)"
-    log "  nvme-auto: root disk = ${rootdev:-unknown}" >&2
-
-    # (1) Reuse an aic-lmcache volume already mounted at AIC_NVME_MOUNT.
-    if mountpoint -q "${AIC_NVME_MOUNT}" 2>/dev/null; then
-        log "  nvme-auto: reusing already-mounted ${AIC_NVME_MOUNT}" >&2
-        printf '%s\n' "${AIC_NVME_MOUNT}"; return 0
-    fi
-
-    # (2) Format + mount a raw, unmounted, non-root NVMe spare.
-    local name fstype mnt cand="" szb
-    while read -r name fstype mnt; do
-        [[ "${name}" =~ ^nvme[0-9]+n[0-9]+$ ]] || continue
-        [[ "${name}" == "${rootdev}" ]] && continue
-        [[ -n "${fstype}" ]] && continue                                   # whole-disk has a fs -> not raw
-        [[ -n "${mnt}" ]] && continue                                      # disk itself mounted
-        [[ "$(lsblk -rno NAME "/dev/${name}" 2>/dev/null | wc -l)" -eq 1 ]] || continue  # has partitions
-        grep -q "^/dev/${name}[[:space:]]" /proc/swaps 2>/dev/null && continue           # in swap
-        szb="$(lsblk -brndo SIZE "/dev/${name}" 2>/dev/null | head -1)"
-        [[ -n "${szb}" && "${szb}" -ge 100000000000 ]] || continue          # >= ~100G
-        cand="/dev/${name}"; break
-    done < <(lsblk -rndo NAME,FSTYPE,MOUNTPOINT 2>/dev/null)
-
-    if [[ -n "${cand}" ]]; then
-        log "  nvme-auto: raw spare ${cand} -> mkfs.ext4 (label ${AIC_NVME_LABEL}) + mount ${AIC_NVME_MOUNT}" >&2
-        if sudo -n mkfs.ext4 -q -F -L "${AIC_NVME_LABEL}" "${cand}" >/dev/null 2>&1 \
-           && sudo -n mkdir -p "${AIC_NVME_MOUNT}" >/dev/null 2>&1 \
-           && sudo -n mount -o noatime "${cand}" "${AIC_NVME_MOUNT}" >/dev/null 2>&1; then
-            sudo -n chown "$(id -u):$(id -g)" "${AIC_NVME_MOUNT}" >/dev/null 2>&1 \
-                || sudo -n chmod 1777 "${AIC_NVME_MOUNT}" >/dev/null 2>&1 || true
-            log "  nvme-auto: mounted ${cand} at ${AIC_NVME_MOUNT} (left mounted for reuse; 'sudo umount ${AIC_NVME_MOUNT}' to release)" >&2
-            printf '%s\n' "${AIC_NVME_MOUNT}"; return 0
-        fi
-        log "  nvme-auto: provisioning ${cand} failed (passwordless sudo required?); trying already-mounted NVMe" >&2
-    fi
-
-    # (3) Use a non-root NVMe filesystem that is already mounted somewhere.
-    local target source fstype2 pk base=""
-    while read -r target source fstype2; do
-        case "${fstype2}" in ext4|xfs) ;; *) continue ;; esac
-        case "${target}" in /|/boot|/boot/*|/usr|/usr/*|/var|/var/*|/etc|/etc/*|/run|/run/*|/home) continue ;; esac
-        pk="$(lsblk -no PKNAME "${source}" 2>/dev/null | head -1)"; pk="${pk:-$(basename "${source}")}"
-        [[ "${pk}" == nvme* ]] || continue
-        [[ "${pk}" == "${rootdev}" ]] && continue
-        [[ -w "${target}" ]] || continue
-        base="${target}"; break
-    done < <(findmnt -rno TARGET,SOURCE,FSTYPE 2>/dev/null)
-    if [[ -n "${base}" ]]; then
-        log "  nvme-auto: using non-root mounted NVMe fs ${base}" >&2
-        printf '%s\n' "${base}"; return 0
-    fi
-
-    log "  nvme-auto: no dedicated NVMe found; falling back to node-local /tmp" >&2
+  command -v lsblk >/dev/null 2>&1 || {
+    log "  nvme-auto: lsblk missing; using /tmp" >&2
     return 0
+  }
+  command -v findmnt >/dev/null 2>&1 || {
+    log "  nvme-auto: findmnt missing; using /tmp" >&2
+    return 0
+  }
+  local rootdev
+  rootdev="$(_root_disk)"
+  log "  nvme-auto: root disk = ${rootdev:-unknown}" >&2
+
+  # (1) Reuse an aic-lmcache volume already mounted at AIC_NVME_MOUNT.
+  if mountpoint -q "${AIC_NVME_MOUNT}" 2>/dev/null; then
+    log "  nvme-auto: reusing already-mounted ${AIC_NVME_MOUNT}" >&2
+    printf '%s\n' "${AIC_NVME_MOUNT}"
+    return 0
+  fi
+
+  # (2) Format + mount a raw, unmounted, non-root NVMe spare.
+  local name fstype mnt cand="" szb
+  while read -r name fstype mnt; do
+    [[ "${name}" =~ ^nvme[0-9]+n[0-9]+$ ]] || continue
+    [[ "${name}" == "${rootdev}" ]] && continue
+    [[ -n "${fstype}" ]] && continue                                                # whole-disk has a fs -> not raw
+    [[ -n "${mnt}" ]] && continue                                                   # disk itself mounted
+    [[ "$(lsblk -rno NAME "/dev/${name}" 2>/dev/null | wc -l)" -eq 1 ]] || continue # has partitions
+    grep -q "^/dev/${name}[[:space:]]" /proc/swaps 2>/dev/null && continue          # in swap
+    szb="$(lsblk -brndo SIZE "/dev/${name}" 2>/dev/null | head -1)"
+    [[ -n "${szb}" && "${szb}" -ge 100000000000 ]] || continue # >= ~100G
+    cand="/dev/${name}"
+    break
+  done < <(lsblk -rndo NAME,FSTYPE,MOUNTPOINT 2>/dev/null)
+
+  if [[ -n "${cand}" ]]; then
+    log "  nvme-auto: raw spare ${cand} -> mkfs.ext4 (label ${AIC_NVME_LABEL}) + mount ${AIC_NVME_MOUNT}" >&2
+    if sudo -n mkfs.ext4 -q -F -L "${AIC_NVME_LABEL}" "${cand}" >/dev/null 2>&1 &&
+      sudo -n mkdir -p "${AIC_NVME_MOUNT}" >/dev/null 2>&1 &&
+      sudo -n mount -o noatime "${cand}" "${AIC_NVME_MOUNT}" >/dev/null 2>&1; then
+      sudo -n chown "$(id -u):$(id -g)" "${AIC_NVME_MOUNT}" >/dev/null 2>&1 ||
+        sudo -n chmod 1777 "${AIC_NVME_MOUNT}" >/dev/null 2>&1 || true
+      log "  nvme-auto: mounted ${cand} at ${AIC_NVME_MOUNT} (left mounted for reuse; 'sudo umount ${AIC_NVME_MOUNT}' to release)" >&2
+      printf '%s\n' "${AIC_NVME_MOUNT}"
+      return 0
+    fi
+    log "  nvme-auto: provisioning ${cand} failed (passwordless sudo required?); trying already-mounted NVMe" >&2
+  fi
+
+  # (3) Use a non-root NVMe filesystem that is already mounted somewhere.
+  local target source fstype2 pk base=""
+  while read -r target source fstype2; do
+    case "${fstype2}" in ext4 | xfs) ;; *) continue ;; esac
+    case "${target}" in / | /boot | /boot/* | /usr | /usr/* | /var | /var/* | /etc | /etc/* | /run | /run/* | /home) continue ;; esac
+    pk="$(lsblk -no PKNAME "${source}" 2>/dev/null | head -1)"
+    pk="${pk:-$(basename "${source}")}"
+    [[ "${pk}" == nvme* ]] || continue
+    [[ "${pk}" == "${rootdev}" ]] && continue
+    [[ -w "${target}" ]] || continue
+    base="${target}"
+    break
+  done < <(findmnt -rno TARGET,SOURCE,FSTYPE 2>/dev/null)
+  if [[ -n "${base}" ]]; then
+    log "  nvme-auto: using non-root mounted NVMe fs ${base}" >&2
+    printf '%s\n' "${base}"
+    return 0
+  fi
+
+  log "  nvme-auto: no dedicated NVMe found; falling back to node-local /tmp" >&2
+  return 0
 }
 
 # Finalize AIC_LOCAL_ROOT and the NVME/NFS/slab tier paths.
 provision_storage() {
-    if [[ -n "${_AIC_LOCAL_ROOT_PINNED}" || -n "${_AIC_NVME_DATA_PINNED}" ]]; then
-        log "storage: honoring caller-pinned NVME_DATA/AIC_LOCAL_ROOT (auto-detect skipped)"
-    elif [[ "${AIC_NVME_AUTO}" == "1" ]]; then
-        log "storage: AIC_NVME_AUTO=1 -- detecting a dedicated local NVMe"
-        local base; base="$(_detect_or_provision_nvme)"
-        [[ -n "${base}" ]] && AIC_LOCAL_ROOT="${base}/aic-cliff.${SLURM_JOB_ID:-manual}"
-    else
-        log "storage: AIC_NVME_AUTO=0 -- using node-local /tmp on the root disk"
-    fi
-    AIC_LOCAL_ROOT="${AIC_LOCAL_ROOT:-/tmp/aic-cliff.${SLURM_JOB_ID:-manual}}"
-    NVME_DATA="${NVME_DATA:-${AIC_LOCAL_ROOT}/nvme}"          # L2a AIS_MT pool
-    NFS_DATA="${NFS_DATA:-${AIC_LOCAL_ROOT}/nfs}"             # L2b POSIX pool (local stand-in)
-    GDS_SLAB_DATA="${GDS_SLAB_DATA:-${AIC_LOCAL_ROOT}/slab}"  # GDS L1 slab
+  if [[ -n "${_AIC_LOCAL_ROOT_PINNED}" || -n "${_AIC_NVME_DATA_PINNED}" ]]; then
+    log "storage: honoring caller-pinned NVME_DATA/AIC_LOCAL_ROOT (auto-detect skipped)"
+  elif [[ "${AIC_NVME_AUTO}" == "1" ]]; then
+    log "storage: AIC_NVME_AUTO=1 -- detecting a dedicated local NVMe"
+    local base
+    base="$(_detect_or_provision_nvme)"
+    [[ -n "${base}" ]] && AIC_LOCAL_ROOT="${base}/aic-cliff.${SLURM_JOB_ID:-manual}"
+  else
+    log "storage: AIC_NVME_AUTO=0 -- using node-local /tmp on the root disk"
+  fi
+  AIC_LOCAL_ROOT="${AIC_LOCAL_ROOT:-/tmp/aic-cliff.${SLURM_JOB_ID:-manual}}"
+  NVME_DATA="${NVME_DATA:-${AIC_LOCAL_ROOT}/nvme}"         # L2a AIS_MT pool
+  NFS_DATA="${NFS_DATA:-${AIC_LOCAL_ROOT}/nfs}"            # L2b POSIX pool (local stand-in)
+  GDS_SLAB_DATA="${GDS_SLAB_DATA:-${AIC_LOCAL_ROOT}/slab}" # GDS L1 slab
 }
 
 # Detect the node's GPU arch (gfxNNNN) for default-model selection.  Prefer the
@@ -353,17 +373,26 @@ provision_storage() {
 # (gfx_target_version, e.g. 90402 -> gfx942, 110000 -> gfx1100).  Echoes the arch
 # or nothing.
 detect_gpu_arch() {
-    local a v maj min stp
-    a="$(rocm_agent_enumerator 2>/dev/null | grep -m1 -E '^gfx[0-9a-f]+')" \
-        && [[ -n "${a}" ]] && { printf '%s' "${a}"; return; }
-    a="$(rocminfo 2>/dev/null | grep -m1 -oE 'gfx[0-9a-f]+')" \
-        && [[ -n "${a}" ]] && { printf '%s' "${a}"; return; }
-    for f in /sys/class/kfd/kfd/topology/nodes/*/properties; do
-        v="$(grep -m1 '^gfx_target_version ' "${f}" 2>/dev/null | awk '{print $2}')"
-        [[ "${v}" =~ ^[0-9]+$ && "${v}" -gt 0 ]] || continue
-        maj=$(( v / 10000 )); min=$(( (v / 100) % 100 )); stp=$(( v % 100 ))
-        printf 'gfx%d%x%x' "${maj}" "${min}" "${stp}"; return
-    done
+  local a v maj min stp
+  a="$(rocm_agent_enumerator 2>/dev/null | grep -m1 -E '^gfx[0-9a-f]+')" &&
+    [[ -n "${a}" ]] && {
+    printf '%s' "${a}"
+    return
+  }
+  a="$(rocminfo 2>/dev/null | grep -m1 -oE 'gfx[0-9a-f]+')" &&
+    [[ -n "${a}" ]] && {
+    printf '%s' "${a}"
+    return
+  }
+  for f in /sys/class/kfd/kfd/topology/nodes/*/properties; do
+    v="$(grep -m1 '^gfx_target_version ' "${f}" 2>/dev/null | awk '{print $2}')"
+    [[ "${v}" =~ ^[0-9]+$ && "${v}" -gt 0 ]] || continue
+    maj=$((v / 10000))
+    min=$(((v / 100) % 100))
+    stp=$((v % 100))
+    printf 'gfx%d%x%x' "${maj}" "${min}" "${stp}"
+    return
+  done
 }
 
 # Choose VLLM_MODEL from the detected arch unless the caller pinned it.  Big-VRAM
@@ -371,25 +400,30 @@ detect_gpu_arch() {
 # safe) -> AIC_MODEL_SMALL, except detection failure defaults to BIG to preserve
 # the historical gfx942 behavior.
 select_default_model() {
-    if [[ -n "${VLLM_MODEL}" ]]; then
-        log "model       : ${VLLM_MODEL} (pinned by caller)"
-        return
-    fi
-    local arch; arch="$(detect_gpu_arch)"
-    case "${arch}" in
-        gfx942|gfx950)
-            VLLM_MODEL="${AIC_MODEL_BIG}"
-            log "model       : auto (${arch}, big-VRAM CDNA) -> ${VLLM_MODEL}" ;;
-        gfx90a|gfx908|gfx906|gfx11??|gfx12??)
-            VLLM_MODEL="${AIC_MODEL_SMALL}"
-            log "model       : auto (${arch}, small-VRAM) -> ${VLLM_MODEL}" ;;
-        "")
-            VLLM_MODEL="${AIC_MODEL_BIG}"
-            log "model       : WARN could not detect GPU arch; defaulting to ${VLLM_MODEL} (set VLLM_MODEL to override)" ;;
-        *)
-            VLLM_MODEL="${AIC_MODEL_SMALL}"
-            log "model       : auto (unrecognized arch ${arch}) -> conservative ${VLLM_MODEL}" ;;
-    esac
+  if [[ -n "${VLLM_MODEL}" ]]; then
+    log "model       : ${VLLM_MODEL} (pinned by caller)"
+    return
+  fi
+  local arch
+  arch="$(detect_gpu_arch)"
+  case "${arch}" in
+  gfx942 | gfx950)
+    VLLM_MODEL="${AIC_MODEL_BIG}"
+    log "model       : auto (${arch}, big-VRAM CDNA) -> ${VLLM_MODEL}"
+    ;;
+  gfx90a | gfx908 | gfx906 | gfx11?? | gfx12??)
+    VLLM_MODEL="${AIC_MODEL_SMALL}"
+    log "model       : auto (${arch}, small-VRAM) -> ${VLLM_MODEL}"
+    ;;
+  "")
+    VLLM_MODEL="${AIC_MODEL_BIG}"
+    log "model       : WARN could not detect GPU arch; defaulting to ${VLLM_MODEL} (set VLLM_MODEL to override)"
+    ;;
+  *)
+    VLLM_MODEL="${AIC_MODEL_SMALL}"
+    log "model       : auto (unrecognized arch ${arch}) -> conservative ${VLLM_MODEL}"
+    ;;
+  esac
 }
 
 log "host        : $(hostname)  job=${SLURM_JOB_ID:-manual}"
@@ -402,13 +436,13 @@ log "results     : ${RESULTS}"
 command -v docker >/dev/null 2>&1 || die "docker not found on $(hostname)"
 # REPO must be the aic-day-release tree (it is bind-mounted at /work so the
 # benchmark can run benchmarks/run_cliff.py); fail early and clearly otherwise.
-[[ -f "${REPO}/benchmarks/run_cliff.py" ]] || \
-    die "benchmarks/run_cliff.py not found under REPO=${REPO}; submit from the aic-day-release/ dir (SLURM_SUBMIT_DIR)"
+[[ -f "${REPO}/benchmarks/run_cliff.py" ]] ||
+  die "benchmarks/run_cliff.py not found under REPO=${REPO}; submit from the aic-day-release/ dir (SLURM_SUBMIT_DIR)"
 
 # Pre-create the compose log-mount dirs too, so docker doesn't auto-create them
 # as root under the per-job logs tree (the lmcache/vllm services bind-mount these).
 mkdir -p "${RESULTS}" "${PLOTS}" "${NVME_DATA}" "${NFS_DATA}" "${GDS_SLAB_DATA}" \
-         "${LOGDIR}/lmcache" "${LOGDIR}/vllm"
+  "${LOGDIR}/lmcache" "${LOGDIR}/vllm"
 [[ -d "${HF_HOME}/hub" ]] || die "HF cache not found at ${HF_HOME}/hub"
 
 # --- Load images from shared tarballs when needed ----------------------------
@@ -422,31 +456,35 @@ mkdir -p "${RESULTS}" "${PLOTS}" "${NVME_DATA}" "${NFS_DATA}" "${GDS_SLAB_DATA}"
 #   $1=image name:tag  $2=tarball glob  $3=mode ("required" -> die if no tarball;
 #   otherwise best-effort).  Returns 0 iff the image is present afterward.
 load_image_if_needed() {
-    local image="$1" glob="$2" mode="${3:-optional}"
-    local tb marker have tarm loadedm
-    tb="$(ls -t ${glob} 2>/dev/null | head -1 || true)"
-    marker="/var/tmp/aic-loaded-$(id -u)-$(printf '%s' "${image}" | tr '/:' '__').mtime"
-    have="$(docker images -q "${image}" 2>/dev/null)"
-    tarm="$(stat -c %Y "${tb}" 2>/dev/null || echo 0)"
-    loadedm="$(cat "${marker}" 2>/dev/null || echo 0)"
-    if [[ "${AIC_FORCE_LOAD:-0}" == "1" || -z "${have}" || "${tarm}" -gt "${loadedm}" ]]; then
-        if [[ -z "${tb}" ]]; then
-            [[ "${mode}" == "required" ]] && die "image ${image} absent and no tarball matching ${glob} (run the build first)"
-            [[ -n "${have}" ]] && return 0   # no tarball, but image already present
-            log "  ${image}: absent and no tarball (${glob}); skipping"
-            return 1
-        fi
-        log "loading ${image} from ${tb} (tarball=${tarm} last-loaded=${loadedm} present=$([[ -n "${have}" ]] && echo yes || echo no) force=${AIC_FORCE_LOAD:-0})"
-        case "${tb}" in
-            *.zst) zstd -dc "${tb}" | docker load ;;
-            *.gz)  gzip  -dc "${tb}" | docker load ;;
-            *)     docker load -i "${tb}" ;;
-        esac || { [[ "${mode}" == "required" ]] && die "docker load failed"; log "  ${image}: docker load failed"; return 1; }
-        echo "${tarm}" > "${marker}" 2>/dev/null || true
-    else
-        log "image up to date on $(hostname): ${image} (id ${have}); AIC_FORCE_LOAD=1 forces a reload"
+  local image="$1" glob="$2" mode="${3:-optional}"
+  local tb marker have tarm loadedm
+  tb="$(ls -t ${glob} 2>/dev/null | head -1 || true)"
+  marker="/var/tmp/aic-loaded-$(id -u)-$(printf '%s' "${image}" | tr '/:' '__').mtime"
+  have="$(docker images -q "${image}" 2>/dev/null)"
+  tarm="$(stat -c %Y "${tb}" 2>/dev/null || echo 0)"
+  loadedm="$(cat "${marker}" 2>/dev/null || echo 0)"
+  if [[ "${AIC_FORCE_LOAD:-0}" == "1" || -z "${have}" || "${tarm}" -gt "${loadedm}" ]]; then
+    if [[ -z "${tb}" ]]; then
+      [[ "${mode}" == "required" ]] && die "image ${image} absent and no tarball matching ${glob} (run the build first)"
+      [[ -n "${have}" ]] && return 0 # no tarball, but image already present
+      log "  ${image}: absent and no tarball (${glob}); skipping"
+      return 1
     fi
-    return 0
+    log "loading ${image} from ${tb} (tarball=${tarm} last-loaded=${loadedm} present=$([[ -n "${have}" ]] && echo yes || echo no) force=${AIC_FORCE_LOAD:-0})"
+    case "${tb}" in
+    *.zst) zstd -dc "${tb}" | docker load ;;
+    *.gz) gzip -dc "${tb}" | docker load ;;
+    *) docker load -i "${tb}" ;;
+    esac || {
+      [[ "${mode}" == "required" ]] && die "docker load failed"
+      log "  ${image}: docker load failed"
+      return 1
+    }
+    echo "${tarm}" >"${marker}" 2>/dev/null || true
+  else
+    log "image up to date on $(hostname): ${image} (id ${have}); AIC_FORCE_LOAD=1 forces a reload"
+  fi
+  return 0
 }
 
 # Main inference image (required -- the whole run needs it).
@@ -460,14 +498,16 @@ load_image_if_needed "${AIC_IMAGE}" "${AIC_IMAGE_DIR}/${_img_base}-*.tar.*" requ
 # service the container is port-skipped anyway; with neither, node-exporter's
 # nvme/infiniband collectors still cover it -- see _monitoring_run_up.
 if [[ "${AIC_EXPORTERS}" == "1" ]]; then
-    if [[ -z "${AIC_NVME_EXPORTER_IMAGE:-}" ]]; then
-        _t="aic-nvme-exporter:latest"; _b="$(printf '%s' "${_t}" | tr '/:' '--')"
-        load_image_if_needed "${_t}" "${AIC_IMAGE_DIR}/${_b}.tar.*" && export AIC_NVME_EXPORTER_IMAGE="${_t}"
-    fi
-    if [[ -z "${AIC_RDMA_EXPORTER_IMAGE:-}" ]]; then
-        _t="aic-rdma-exporter:latest"; _b="$(printf '%s' "${_t}" | tr '/:' '--')"
-        load_image_if_needed "${_t}" "${AIC_IMAGE_DIR}/${_b}.tar.*" && export AIC_RDMA_EXPORTER_IMAGE="${_t}"
-    fi
+  if [[ -z "${AIC_NVME_EXPORTER_IMAGE:-}" ]]; then
+    _t="aic-nvme-exporter:latest"
+    _b="$(printf '%s' "${_t}" | tr '/:' '--')"
+    load_image_if_needed "${_t}" "${AIC_IMAGE_DIR}/${_b}.tar.*" && export AIC_NVME_EXPORTER_IMAGE="${_t}"
+  fi
+  if [[ -z "${AIC_RDMA_EXPORTER_IMAGE:-}" ]]; then
+    _t="aic-rdma-exporter:latest"
+    _b="$(printf '%s' "${_t}" | tr '/:' '--')"
+    load_image_if_needed "${_t}" "${AIC_IMAGE_DIR}/${_b}.tar.*" && export AIC_RDMA_EXPORTER_IMAGE="${_t}"
+  fi
 fi
 
 # --- Benchmark client env (offline HF cache) ---------------------------------
@@ -476,15 +516,15 @@ fi
 # docker/docker-compose.yml (see the compose-stack setup block below), not raw
 # docker run -- all container/GPU/cap flags now live in that compose file.
 HF_ENV=(-e HF_HOME=/hf -e HF_HUB_CACHE=/hf/hub -e HF_HUB_OFFLINE=1
-        -e TRANSFORMERS_OFFLINE=1 -e VLLM_CACHE_ROOT=/hf/vllm
-        -e ROCR_VISIBLE_DEVICES=0 -e PYTHONHASHSEED=0
-        -e AMDGCN_USE_BUFFER_OPS=0 -e MIOPEN_FIND_MODE=FAST
-        # AITER unified attention: required so a KV connector (LMCache) can unify
-        # gpt-oss's hybrid (sliding-window + full) KV-cache specs.  Without
-        # VLLM_ROCM_USE_AITER=1 the ROCM_AITER_UNIFIED_ATTN backend is rejected and
-        # vLLM falls back to TRITON_ATTN -> "Hybrid KV cache manager is disabled but
-        # failed to convert the KV cache specs" at engine init.
-        -e VLLM_ROCM_USE_AITER=${AIC_ROCM_USE_AITER})
+  -e TRANSFORMERS_OFFLINE=1 -e VLLM_CACHE_ROOT=/hf/vllm
+  -e ROCR_VISIBLE_DEVICES=0 -e PYTHONHASHSEED=0
+  -e AMDGCN_USE_BUFFER_OPS=0 -e MIOPEN_FIND_MODE=FAST
+  # AITER unified attention: required so a KV connector (LMCache) can unify
+  # gpt-oss's hybrid (sliding-window + full) KV-cache specs.  Without
+  # VLLM_ROCM_USE_AITER=1 the ROCM_AITER_UNIFIED_ATTN backend is rejected and
+  # vLLM falls back to TRITON_ATTN -> "Hybrid KV cache manager is disabled but
+  # failed to convert the KV cache specs" at engine init.
+  -e VLLM_ROCM_USE_AITER=${AIC_ROCM_USE_AITER})
 
 # --- Compose stack (single source of truth: docker/docker-compose.yml) --------
 # Every arm drives the SAME compose file.  The plain vram baseline starts only the
@@ -500,11 +540,12 @@ compose() { docker compose -f "${COMPOSE_FILE}" "$@"; }
 
 # Knobs the compose file interpolates (already resolved above).  ROCM_ARCH is only
 # read by build.args, but compose interpolates it even on `up`, so keep it set.
-export IMAGE_NAME="${AIC_IMAGE}"
+export IMAGE_REF="${AIC_IMAGE}"
+export IMAGE_NAME="${AIC_IMAGE%:*}"
 export ROCM_ARCH="${ROCM_ARCH:-$(detect_gpu_arch)}"
 export GPU=0
 export HF_HOME NVME_DATA NFS_DATA GDS_SLAB_DATA
-export LOG="${LOGDIR}"                       # lmcache/vllm container logs land under the job dir
+export LOG="${LOGDIR}" # lmcache/vllm container logs land under the job dir
 export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
 export VLLM_MODEL TENSOR_PARALLEL_SIZE
 export VLM_GPU_MEMORY_UTILIZATION VLM_MAX_MODEL_LEN VLM_MAX_NUM_BATCHED_TOKENS
@@ -527,36 +568,39 @@ export VLLM_EXTRA_ARGS
 AIC_GDS_SLAB_GB="${LMCACHE_L1_SIZE_GB}"
 
 # --- Helpers -----------------------------------------------------------------
-wait_ready() {  # $1=port $2=timeout_s
-    local port="$1" timeout="${2:-${AIC_VLLM_READY_TIMEOUT:-1200}}" waited=0
-    log "waiting for vLLM on :${port} (up to ${timeout}s)"
-    while (( waited < timeout )); do
-        if curl -fsS "http://localhost:${port}/v1/models" >/dev/null 2>&1; then
-            log "vLLM :${port} is ready (${waited}s)"; return 0
-        fi
-        sleep 10; waited=$((waited + 10))
-    done
-    return 1
+wait_ready() { # $1=port $2=timeout_s
+  local port="$1" timeout="${2:-${AIC_VLLM_READY_TIMEOUT:-1200}}" waited=0
+  log "waiting for vLLM on :${port} (up to ${timeout}s)"
+  while ((waited < timeout)); do
+    if curl -fsS "http://localhost:${port}/v1/models" >/dev/null 2>&1; then
+      log "vLLM :${port} is ready (${waited}s)"
+      return 0
+    fi
+    sleep 10
+    waited=$((waited + 10))
+  done
+  return 1
 }
 
-run_bench() {  # $1=arm $2=endpoint_port $3=out_csv $4=extra args...
-    local arm="$1" port="$2" out="$3"; shift 3
-    log "running sweep: arm=${arm} endpoint=:${port} -> ${out}"
-    docker run --rm --network host \
-        -v "${REPO}":/work -w /work \
-        -v "${HF_HOME}":/hf "${HF_ENV[@]}" \
-        --entrypoint python3 "${AIC_IMAGE}" \
-        benchmarks/run_cliff.py \
-            --endpoint "http://localhost:${port}" \
-            --model "${VLLM_MODEL}" \
-            --arm "${arm}" \
-            --isl "${BENCH_ISL}" \
-            --shared-prefix-tokens "${BENCH_SHARED_TOK}" \
-            --concurrencies "${BENCH_CONCUR}" \
-            --iters "${BENCH_ITERS}" \
-            --prefix-mode "${BENCH_PREFIX_MODE}" \
-            --warmup-iters 1 \
-            --out "${LOGDIR_REL}/results/$(basename "${out}")" "$@"
+run_bench() { # $1=arm $2=endpoint_port $3=out_csv $4=extra args...
+  local arm="$1" port="$2" out="$3"
+  shift 3
+  log "running sweep: arm=${arm} endpoint=:${port} -> ${out}"
+  docker run --rm --network host \
+    -v "${REPO}":/work -w /work \
+    -v "${HF_HOME}":/hf "${HF_ENV[@]}" \
+    --entrypoint python3 "${AIC_IMAGE}" \
+    benchmarks/run_cliff.py \
+    --endpoint "http://localhost:${port}" \
+    --model "${VLLM_MODEL}" \
+    --arm "${arm}" \
+    --isl "${BENCH_ISL}" \
+    --shared-prefix-tokens "${BENCH_SHARED_TOK}" \
+    --concurrencies "${BENCH_CONCUR}" \
+    --iters "${BENCH_ITERS}" \
+    --prefix-mode "${BENCH_PREFIX_MODE}" \
+    --warmup-iters 1 \
+    --out "${LOGDIR_REL}/results/$(basename "${out}")" "$@"
 }
 
 # Pre-launch cleanup: drop any leftover container WITHOUT capturing its log --
@@ -571,22 +615,22 @@ rm_containers() { docker rm -f "$@" >/dev/null 2>&1 || true; }
 # `compose logs` for a service not started (e.g. lmcache on the vram arm) is a
 # harmless empty capture.  `compose down` removes containers + the bridge network.
 stop_stack() {
-    local svc c
-    # Capture each service's logs before teardown (bounded).
-    for svc in vllm lmcache; do
-        timeout 30 compose logs --no-color --no-log-prefix "${svc}" > "${LOGDIR}/container-aic-${svc}.log" 2>&1 || true
-    done
-    # vLLM + lmcache run in a SHARED PID namespace (required for cross-container HIP
-    # IPC KV registration).  That prevents docker from reaping vLLM's EngineCore
-    # children, so a plain `compose down`/`docker rm` HANGS.  Force-kill the stack's
-    # processes first (one MP stack per node under host networking, so scoping by
-    # process name is safe here), then tear the now-empty containers down.
-    pkill -9 -f 'vllm.entrypoints.openai' 2>/dev/null || true
-    pkill -9 -f 'EngineCore'              2>/dev/null || true
-    pkill -9 -f 'lmcache server'          2>/dev/null || true
-    sleep 2
-    timeout 60 compose --profile cache down --remove-orphans --timeout 5 >/dev/null 2>&1 || true
-    for c in aic-vllm-gpu0 aic-lmcache; do timeout 30 docker rm -f "${c}" >/dev/null 2>&1 || true; done
+  local svc c
+  # Capture each service's logs before teardown (bounded).
+  for svc in vllm lmcache; do
+    timeout 30 compose logs --no-color --no-log-prefix "${svc}" >"${LOGDIR}/container-aic-${svc}.log" 2>&1 || true
+  done
+  # vLLM + lmcache run in a SHARED PID namespace (required for cross-container HIP
+  # IPC KV registration).  That prevents docker from reaping vLLM's EngineCore
+  # children, so a plain `compose down`/`docker rm` HANGS.  Force-kill the stack's
+  # processes first (one MP stack per node under host networking, so scoping by
+  # process name is safe here), then tear the now-empty containers down.
+  pkill -9 -f 'vllm.entrypoints.openai' 2>/dev/null || true
+  pkill -9 -f 'EngineCore' 2>/dev/null || true
+  pkill -9 -f 'lmcache server' 2>/dev/null || true
+  sleep 2
+  timeout 60 compose --profile cache down --remove-orphans --timeout 5 >/dev/null 2>&1 || true
+  for c in aic-vllm-gpu0 aic-lmcache; do timeout 30 docker rm -f "${c}" >/dev/null 2>&1 || true; done
 }
 
 # --- Metrics-capture sidecar (Prometheus + optional exporters) ---------------
@@ -608,23 +652,26 @@ trap stop_monitoring EXIT
 # behind the `cache` profile (skipped) and vllm's depends_on is required:false.
 VRAM_CSV="${RESULTS}/cliff-vram_only-${STAMP}.csv"
 run_arm_vram() {
-    rm_containers aic-vllm-gpu0 aic-lmcache
-    log "=== Arm A (vram_only): plain vLLM (no LMCache) on :${VLLM_ENDPOINT_PORT} ==="
-    export KV_TRANSFER_ARG=""     # no connector -> plain VRAM-prefix-cache-only vLLM
-    export GDS_MODE=""
-    export VLLM_PID_MODE=""       # vllm runs alone; no lmcache PID ns to join
-    if ! compose up -d vllm; then
-        log "Arm A: compose up vllm failed"; stop_stack; return 1
-    fi
-    if ! wait_ready "${VLLM_ENDPOINT_PORT}"; then
-        log "Arm A: server never became ready; last logs:"
-        compose logs --tail 40 --no-color vllm 2>&1 | sed 's/^/    /'
-        stop_stack; return 1
-    fi
-    run_bench vram_only "${VLLM_ENDPOINT_PORT}" "${VRAM_CSV}"
-    local rc=$?
+  rm_containers aic-vllm-gpu0 aic-lmcache
+  log "=== Arm A (vram_only): plain vLLM (no LMCache) on :${VLLM_ENDPOINT_PORT} ==="
+  export KV_TRANSFER_ARG="" # no connector -> plain VRAM-prefix-cache-only vLLM
+  export GDS_MODE=""
+  export VLLM_PID_MODE="" # vllm runs alone; no lmcache PID ns to join
+  if ! compose up -d vllm; then
+    log "Arm A: compose up vllm failed"
     stop_stack
-    return $rc
+    return 1
+  fi
+  if ! wait_ready "${VLLM_ENDPOINT_PORT}"; then
+    log "Arm A: server never became ready; last logs:"
+    compose logs --tail 40 --no-color vllm 2>&1 | sed 's/^/    /'
+    stop_stack
+    return 1
+  fi
+  run_bench vram_only "${VLLM_ENDPOINT_PORT}" "${VRAM_CSV}"
+  local rc=$?
+  stop_stack
+  return $rc
 }
 
 # =============================================================================
@@ -644,7 +691,7 @@ run_arm_vram() {
 # file carries only the disk tier + hashing.  use_odirect=false -> buffered
 # (page cache); true -> O_DIRECT.
 write_lmcache_localdisk_config() {
-    cat > "${LOGDIR}/lmcache-localdisk.yml" <<YML
+  cat >"${LOGDIR}/lmcache-localdisk.yml" <<YML
 # Generated by run-cliff.sbatch (kvd_v2 nvme arm, local_disk L2) -- native LocalDiskBackend (POSIX).
 chunk_size: 256
 local_disk: "file:///data/nvme/lmcache-disk"
@@ -656,66 +703,69 @@ extra_config:
 YML
 }
 
-run_arm_kvd() {  # $1=mode(nvme|gds) $2=out_csv
-    local mode="$1" out="$2"
-    log "=== Arm B (kvd_v2, mode=${mode}) — LMCache MP connector ==="
-    rm_containers aic-vllm-gpu0 aic-lmcache
+run_arm_kvd() { # $1=mode(nvme|gds) $2=out_csv
+  local mode="$1" out="$2"
+  log "=== Arm B (kvd_v2, mode=${mode}) — LMCache MP connector ==="
+  rm_containers aic-vllm-gpu0 aic-lmcache
 
-    # MP connector arg for vLLM (+ optional kv_load_failure_policy).  Single-quote
-    # the JSON so compose's shlex splitting preserves the inner double quotes.
-    local _fp=""; [[ -n "${AIC_KV_LOAD_FAILURE_POLICY}" ]] && _fp=",\"kv_load_failure_policy\":\"${AIC_KV_LOAD_FAILURE_POLICY}\""
-    export KV_TRANSFER_ARG="--kv-transfer-config '{\"kv_connector\":\"LMCacheMPConnector\",\"kv_role\":\"kv_both\"${_fp},\"kv_connector_extra_config\":{\"lmcache.mp.host\":\"tcp://localhost\",\"lmcache.mp.port\":${LMCACHE_PORT}}}'"
-    export VLLM_PID_MODE=service:lmcache   # share lmcache PID ns for cross-container HIP IPC
+  # MP connector arg for vLLM (+ optional kv_load_failure_policy).  Single-quote
+  # the JSON so compose's shlex splitting preserves the inner double quotes.
+  local _fp=""
+  [[ -n "${AIC_KV_LOAD_FAILURE_POLICY}" ]] && _fp=",\"kv_load_failure_policy\":\"${AIC_KV_LOAD_FAILURE_POLICY}\""
+  export KV_TRANSFER_ARG="--kv-transfer-config '{\"kv_connector\":\"LMCacheMPConnector\",\"kv_role\":\"kv_both\"${_fp},\"kv_connector_extra_config\":{\"lmcache.mp.host\":\"tcp://localhost\",\"lmcache.mp.port\":${LMCACHE_PORT}}}'"
+  export VLLM_PID_MODE=service:lmcache # share lmcache PID ns for cross-container HIP IPC
 
-    local _l2desc
-    if [[ "${mode}" == "gds" ]]; then
-        export GDS_MODE=1
-        export AIC_L2_BACKEND=nixl                       # unused in GDS mode
-        export LMCACHE_L1_SIZE_GB="${AIC_GDS_SLAB_GB}"   # hipFile slab size
-        unset LMCACHE_CONFIG_FILE LMCACHE_CONFIG_FILE_HOST
-        _l2desc="hipFile GDS NVMe slab L1 (${LMCACHE_L1_SIZE_GB}GB)"
+  local _l2desc
+  if [[ "${mode}" == "gds" ]]; then
+    export GDS_MODE=1
+    export AIC_L2_BACKEND=nixl                     # unused in GDS mode
+    export LMCACHE_L1_SIZE_GB="${AIC_GDS_SLAB_GB}" # hipFile slab size
+    unset LMCACHE_CONFIG_FILE LMCACHE_CONFIG_FILE_HOST
+    _l2desc="hipFile GDS NVMe slab L1 (${LMCACHE_L1_SIZE_GB}GB)"
+  else
+    export GDS_MODE=""
+    export AIC_L2_BACKEND="${AIC_L2_BACKEND}"
+    # DRAM L1 for the MP server: the tuned DRAM-L1 size when local_cpu is on,
+    # else the default L1 (a modest server-side DRAM tier in front of the L2).
+    if [[ "${AIC_LOCAL_CPU}" == "true" ]]; then
+      export LMCACHE_L1_SIZE_GB="${LMCACHE_MAX_LOCAL_CPU_SIZE}"
     else
-        export GDS_MODE=""
-        export AIC_L2_BACKEND="${AIC_L2_BACKEND}"
-        # DRAM L1 for the MP server: the tuned DRAM-L1 size when local_cpu is on,
-        # else the default L1 (a modest server-side DRAM tier in front of the L2).
-        if [[ "${AIC_LOCAL_CPU}" == "true" ]]; then
-            export LMCACHE_L1_SIZE_GB="${LMCACHE_MAX_LOCAL_CPU_SIZE}"
-        else
-            export LMCACHE_L1_SIZE_GB="${AIC_GDS_SLAB_GB}"
-        fi
-        if [[ "${AIC_L2_BACKEND}" == "local_disk" ]]; then
-            mkdir -p "${NVME_DATA}/lmcache-disk"
-            write_lmcache_localdisk_config
-            export LMCACHE_CONFIG_FILE_HOST="${LOGDIR}/lmcache-localdisk.yml"
-            export LMCACHE_CONFIG_FILE=/config/lmcache.yml
-            _l2desc="LMCache native LocalDiskBackend L2 (POSIX, $([[ "${AIC_L2_ODIRECT}" == true ]] && echo O_DIRECT || echo buffered), DRAM L1 ${LMCACHE_L1_SIZE_GB}GB)"
-        else
-            unset LMCACHE_CONFIG_FILE LMCACHE_CONFIG_FILE_HOST
-            _l2desc="NIXL AIS_MT NVMe L2 + POSIX L2b (DRAM L1 ${LMCACHE_L1_SIZE_GB}GB, pool ${LMCACHE_NVME_POOL})"
-        fi
+      export LMCACHE_L1_SIZE_GB="${AIC_GDS_SLAB_GB}"
     fi
-    log "  stack: standalone lmcache server (${_l2desc}) + vLLM LMCacheMPConnector on :${VLLM_ENDPOINT_PORT}"
+    if [[ "${AIC_L2_BACKEND}" == "local_disk" ]]; then
+      mkdir -p "${NVME_DATA}/lmcache-disk"
+      write_lmcache_localdisk_config
+      export LMCACHE_CONFIG_FILE_HOST="${LOGDIR}/lmcache-localdisk.yml"
+      export LMCACHE_CONFIG_FILE=/config/lmcache.yml
+      _l2desc="LMCache native LocalDiskBackend L2 (POSIX, $([[ "${AIC_L2_ODIRECT}" == true ]] && echo O_DIRECT || echo buffered), DRAM L1 ${LMCACHE_L1_SIZE_GB}GB)"
+    else
+      unset LMCACHE_CONFIG_FILE LMCACHE_CONFIG_FILE_HOST
+      _l2desc="NIXL AIS_MT NVMe L2 + POSIX L2b (DRAM L1 ${LMCACHE_L1_SIZE_GB}GB, pool ${LMCACHE_NVME_POOL})"
+    fi
+  fi
+  log "  stack: standalone lmcache server (${_l2desc}) + vLLM LMCacheMPConnector on :${VLLM_ENDPOINT_PORT}"
 
-    # `compose up` waits for lmcache's healthcheck before starting vllm
-    # (depends_on: service_healthy), so no manual inter-container sleep is needed.
-    if ! compose --profile cache up -d; then
-        log "kvd/${mode}: compose up failed; last logs:"
-        compose logs --tail 40 --no-color lmcache 2>&1 | sed 's/^/  [lmcache] /'
-        compose logs --tail 40 --no-color vllm    2>&1 | sed 's/^/  [vllm]    /'
-        stop_stack; return 1
-    fi
-    if ! wait_ready "${VLLM_ENDPOINT_PORT}"; then
-        log "kvd/${mode}: server never became ready; last logs:"
-        compose logs --tail 40 --no-color lmcache 2>&1 | sed 's/^/  [lmcache] /'
-        compose logs --tail 60 --no-color vllm    2>&1 | sed 's/^/  [vllm]    /'
-        stop_stack; return 1
-    fi
-    # Per-c warmup + drain: required for per_client mode and async-save kvd.
-    run_bench kvd_v2 "${VLLM_ENDPOINT_PORT}" "${out}" --warmup-at-each-c --post-warmup-sleep-s 5
-    local rc=$?
+  # `compose up` waits for lmcache's healthcheck before starting vllm
+  # (depends_on: service_healthy), so no manual inter-container sleep is needed.
+  if ! compose --profile cache up -d; then
+    log "kvd/${mode}: compose up failed; last logs:"
+    compose logs --tail 40 --no-color lmcache 2>&1 | sed 's/^/  [lmcache] /'
+    compose logs --tail 40 --no-color vllm 2>&1 | sed 's/^/  [vllm]    /'
     stop_stack
-    return $rc
+    return 1
+  fi
+  if ! wait_ready "${VLLM_ENDPOINT_PORT}"; then
+    log "kvd/${mode}: server never became ready; last logs:"
+    compose logs --tail 40 --no-color lmcache 2>&1 | sed 's/^/  [lmcache] /'
+    compose logs --tail 60 --no-color vllm 2>&1 | sed 's/^/  [vllm]    /'
+    stop_stack
+    return 1
+  fi
+  # Per-c warmup + drain: required for per_client mode and async-save kvd.
+  run_bench kvd_v2 "${VLLM_ENDPOINT_PORT}" "${out}" --warmup-at-each-c --post-warmup-sleep-s 5
+  local rc=$?
+  stop_stack
+  return $rc
 }
 
 # =============================================================================
@@ -730,9 +780,9 @@ declare -A STATUS
 start_monitoring
 
 # Run only the arms named in AIC_CLIFF_ARMS (comma list of vram,nvme,gds).
-_arm_on() { case ",${AIC_CLIFF_ARMS}," in *",$1,"*) return 0 ;; *) return 1 ;; esac; }
+_arm_on() { case ",${AIC_CLIFF_ARMS}," in *",$1,"*) return 0 ;; *) return 1 ;; esac }
 for _a in ${AIC_CLIFF_ARMS//,/ }; do
-    case "${_a}" in vram|nvme|gds) ;; *) die "unknown arm '${_a}' in AIC_CLIFF_ARMS (valid: vram,nvme,gds)" ;; esac
+  case "${_a}" in vram | nvme | gds) ;; *) die "unknown arm '${_a}' in AIC_CLIFF_ARMS (valid: vram,nvme,gds)" ;; esac
 done
 log "arms        : ${AIC_CLIFF_ARMS}"
 log "isl/prefix  : ISL=${BENCH_ISL} shared=${BENCH_SHARED_TOK} max_model_len=${VLM_MAX_MODEL_LEN}${VLM_ROPE_SCALING:+ rope_scaling=${VLM_ROPE_SCALING}}"
@@ -742,11 +792,11 @@ log "isl/prefix  : ISL=${BENCH_ISL} shared=${BENCH_SHARED_TOK} max_model_len=${V
 # collapse in jobs 67536798/67537066 — the LMCACHE_NVME_POOL override didn't land).
 # In MP mode the DRAM L1 is --l1-size-gb (nvme arm: max_local_cpu_size when
 # local_cpu=true, else the default) and the slab is --l1-size-gb (gds arm).
-log "tiers       : l2_backend=${AIC_L2_BACKEND} local_cpu=${AIC_LOCAL_CPU} dram_l1(nvme)=${LMCACHE_MAX_LOCAL_CPU_SIZE}GB nvme_pool=${LMCACHE_NVME_POOL} slots (~$(( LMCACHE_NVME_POOL * 45 / 10 / 1024 )) GiB) gds_slab=${AIC_GDS_SLAB_GB}GB local_disk=${AIC_LOCAL_DISK_SIZE_GB}GB(odirect=${AIC_L2_ODIRECT})"
+log "tiers       : l2_backend=${AIC_L2_BACKEND} local_cpu=${AIC_LOCAL_CPU} dram_l1(nvme)=${LMCACHE_MAX_LOCAL_CPU_SIZE}GB nvme_pool=${LMCACHE_NVME_POOL} slots (~$((LMCACHE_NVME_POOL * 45 / 10 / 1024)) GiB) gds_slab=${AIC_GDS_SLAB_GB}GB local_disk=${AIC_LOCAL_DISK_SIZE_GB}GB(odirect=${AIC_L2_ODIRECT})"
 
 if _arm_on vram; then run_arm_vram && STATUS[vram_only]=ok || STATUS[vram_only]=FAIL; else STATUS[vram_only]=skip; fi
 if _arm_on nvme; then run_arm_kvd nvme "${KVD_NVME_CSV}" && STATUS[kvd_nvme]=ok || STATUS[kvd_nvme]=FAIL; else STATUS[kvd_nvme]=skip; fi
-if _arm_on gds;  then run_arm_kvd gds  "${KVD_GDS_CSV}"  && STATUS[kvd_gds]=ok  || STATUS[kvd_gds]=FAIL;  else STATUS[kvd_gds]=skip;  fi
+if _arm_on gds; then run_arm_kvd gds "${KVD_GDS_CSV}" && STATUS[kvd_gds]=ok || STATUS[kvd_gds]=FAIL; else STATUS[kvd_gds]=skip; fi
 
 # --- Plot: baseline vs each kvd backend separately ---------------------------
 # Both kvd runs carry arm="kvd_v2", so each is plotted in its own output dir to
@@ -754,27 +804,31 @@ if _arm_on gds;  then run_arm_kvd gds  "${KVD_GDS_CSV}"  && STATUS[kvd_gds]=ok  
 # present.  Any arm can be skipped: run_plot drops CSVs that don't exist and
 # plots whatever remains (plot_cliff.py already handles one-or-more arms), so a
 # single-arm run still produces a chart instead of being silently skipped.
-run_plot() {  # $1=out_subdir  $2..=candidate CSV paths (absolute)
-    local sub="$1"; shift
-    local -a inputs=() csv
-    for csv in "$@"; do
-        [[ -s "${csv}" ]] && inputs+=( "${LOGDIR_REL}/results/$(basename "${csv}")" )
-    done
-    (( ${#inputs[@]} )) || { log "plot ${sub}: no CSVs, skipping"; return; }
-    mkdir -p "${PLOTS}/${sub}"
-    docker run --rm --network host -v "${REPO}":/work -w /work \
-        --entrypoint python3 "${AIC_IMAGE}" \
-        benchmarks/plot_cliff.py \
-            --input "${inputs[@]}" \
-            --output-dir "${LOGDIR_REL}/plots/${sub}" \
-        && log "plots (${sub}) -> ${PLOTS}/${sub}" || log "plot ${sub}: failed"
+run_plot() { # $1=out_subdir  $2..=candidate CSV paths (absolute)
+  local sub="$1"
+  shift
+  local -a inputs=() csv
+  for csv in "$@"; do
+    [[ -s "${csv}" ]] && inputs+=("${LOGDIR_REL}/results/$(basename "${csv}")")
+  done
+  ((${#inputs[@]})) || {
+    log "plot ${sub}: no CSVs, skipping"
+    return
+  }
+  mkdir -p "${PLOTS}/${sub}"
+  docker run --rm --network host -v "${REPO}":/work -w /work \
+    --entrypoint python3 "${AIC_IMAGE}" \
+    benchmarks/plot_cliff.py \
+    --input "${inputs[@]}" \
+    --output-dir "${LOGDIR_REL}/plots/${sub}" &&
+    log "plots (${sub}) -> ${PLOTS}/${sub}" || log "plot ${sub}: failed"
 }
 # Plot each kvd backend that produced a CSV, baseline optional.  If only the
 # vram arm ran, still emit the baseline-only cliff chart.
 [[ -s "${KVD_NVME_CSV}" ]] && run_plot nvme "${VRAM_CSV}" "${KVD_NVME_CSV}"
-[[ -s "${KVD_GDS_CSV}"  ]] && run_plot gds  "${VRAM_CSV}" "${KVD_GDS_CSV}"
+[[ -s "${KVD_GDS_CSV}" ]] && run_plot gds "${VRAM_CSV}" "${KVD_GDS_CSV}"
 if [[ ! -s "${KVD_NVME_CSV}" && ! -s "${KVD_GDS_CSV}" && -s "${VRAM_CSV}" ]]; then
-    run_plot vram "${VRAM_CSV}"
+  run_plot vram "${VRAM_CSV}"
 fi
 
 # --- Cleanup local NVMe scratch ---------------------------------------------

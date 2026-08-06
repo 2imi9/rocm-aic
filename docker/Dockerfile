@@ -2,9 +2,9 @@
 #
 # SPDX-License-Identifier: MIT
 #
-# AIC: Ubuntu 24.04 + ROCm 7.2.2 inference stack.
+# AIC: Ubuntu 24.04 + ROCm inference stack.
 #
-#   Base image: rocm/dev-ubuntu-24.04:7.2.4-complete  (Ubuntu 24.04, ROCm 7.2.4, Python 3.12)
+#   Base image: rocm/dev-ubuntu-24.04:${ROCM_VERSION}-complete  (Ubuntu 24.04, Python 3.12)
 #   vLLM:       installed from pre-built ROCm wheel (bundles its own torch/triton/flash-attn)
 #   LMCache:    LMCache/LMCache v0.5.2 release + 8 AMD patches
 #   hipFile:    ROCm/rocm-systems (GDS/P2PDMA NVMe transfers)
@@ -19,12 +19,14 @@
 #
 # Build (from the repo root — the build context is this tree):
 #   DOCKER_BUILDKIT=1 docker build \
+#     --build-arg AIC_VERSION="$(<VERSION)" \
 #     --build-arg ROCM_ARCH=gfx942 \
 #     -f Dockerfile \
 #     -t rocm-aic .
 #
 #   # Behind AMD Zscaler proxy — pass cert as a BuildKit secret (never baked into image):
 #   DOCKER_BUILDKIT=1 docker build \
+#     --build-arg AIC_VERSION="$(<VERSION)" \
 #     --build-arg ROCM_ARCH=gfx942 \
 #     --secret id=tls_cert,src=/path/to/corp-ca.crt \
 #     -f Dockerfile \
@@ -40,7 +42,8 @@
 #
 # Wheels: the build also produces pip-installable wheels for the patched LMCache
 # and ROCm NIXL under /wheels.  Extract them with the `wheels` stage:
-#   docker build --target wheels --output type=local,dest=./wheels .
+#   docker build --build-arg AIC_VERSION="$(<VERSION)" \
+#     --target wheels --output type=local,dest=./wheels .
 # (the default target remains the full runtime image -- see stages 8/9 below).
 
 # The main build stage is named `build`; two trailing stages at the end of this
@@ -48,12 +51,20 @@
 # the default target -- identical to `build`, so existing `docker build` callers
 # are unaffected).  Publishing wheels: `docker build --target wheels
 # --output type=local,dest=<dir>` extracts /wheels without loading the image.
-FROM rocm/dev-ubuntu-24.04:7.2.4-complete AS build
+ARG ROCM_VERSION=7.2.4
+ARG ROCM_BASE_IMAGE=rocm/dev-ubuntu-24.04:${ROCM_VERSION}-complete
+# ROCM_BASE_IMAGE has a tagged default but remains overridable by callers.
+# hadolint ignore=DL3006
+FROM ${ROCM_BASE_IMAGE} AS build
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
+ARG AIC_VERSION
+ARG ROCM_VERSION
+ARG ROCM_BASE_IMAGE
 ARG ROCM_ARCH
-RUN test -n "$ROCM_ARCH" || (echo "ERROR: ROCM_ARCH is not set" && exit 1)
+RUN { test -n "$AIC_VERSION" || { echo "ERROR: AIC_VERSION is not set (read it from VERSION)"; exit 1; }; } && \
+    { test -n "$ROCM_ARCH" || { echo "ERROR: ROCM_ARCH is not set"; exit 1; }; }
 
 # Parallel compile jobs for the C++/HIP source builds below (LMCache, hipFile,
 # hsa-snoop). Defaults to $(nproc).
@@ -83,6 +94,19 @@ ARG HSA_SNOOP_REF=v1.0.0
 # Note: LMCache v0.5.2+ is required for vLLM >= 0.26.0.
 ARG LMCACHE_GIT_URL=https://github.com/LMCache/LMCache.git
 ARG LMCACHE_REF=v0.5.2
+
+# Provide image metadata that can be viewed from `docker inspect`.
+LABEL org.opencontainers.image.title="rocm-aic" \
+      org.opencontainers.image.description="AMD Infinity Context: ROCm vLLM + LMCache tiered-cache inference stack" \
+      org.opencontainers.image.version="${AIC_VERSION}" \
+      org.opencontainers.image.base.name="${ROCM_BASE_IMAGE}" \
+      ai.amd.aic.version="${AIC_VERSION}" \
+      ai.amd.aic.rocm="${ROCM_VERSION}" \
+      ai.amd.aic.vllm="${VLLM_VERSION}+${VLLM_ROCM_VARIANT}" \
+      ai.amd.aic.lmcache="${LMCACHE_REF}" \
+      ai.amd.aic.nixl="${NIXL_REF}" \
+      ai.amd.aic.hipfile="${HIPFILE_SHA}" \
+      ai.amd.aic.hsa-snoop="${HSA_SNOOP_REF}"
 
 # ----- 0. Corporate CA (optional, Zscaler/AMD) --------------------------------
 # Pass a CA cert at build time via BuildKit secret to reach HTTPS through a
@@ -237,11 +261,16 @@ RUN uv pip uninstall --system \
 
 # ----- 5. ROCm/rocm-systems hipFile (DEB + Python binding) ------------------
 RUN --mount=type=cache,target=/root/.cache/uv \
-    git clone --no-checkout --filter=blob:none \
-        https://github.com/ROCm/rocm-systems.git /app/rocm-systems && \
+    git init --quiet /app/rocm-systems && \
     cd /app/rocm-systems && \
-    git sparse-checkout set --cone projects/hipfile && \
-    git checkout "${HIPFILE_SHA}" && \
+    git remote add origin https://github.com/ROCm/rocm-systems.git && \
+    git config remote.origin.promisor true && \
+    git config remote.origin.partialclonefilter blob:none && \
+    git sparse-checkout init --cone && \
+    git sparse-checkout set projects/hipfile && \
+    git fetch --quiet --depth=1 --filter=blob:none --no-tags \
+        origin "${HIPFILE_SHA}" && \
+    git checkout --quiet --detach FETCH_HEAD && \
     cd projects/hipfile && \
     mkdir -p build && cd build && \
     cmake -DCMAKE_HIP_PLATFORM=amd -DAIS_INSTALL_TOOLS=ON \
@@ -337,7 +366,8 @@ ENTRYPOINT ["python3", "-m", "vllm.entrypoints.openai.api_server"]
 # ----- 8. Wheel export stage -------------------------------------------------
 # A scratch image whose only content is the pip wheels built above (patched
 # LMCache + ROCm NIXL).  Extract them WITHOUT building/loading the full image:
-#   docker build --target wheels --output type=local,dest=./wheels .
+#   docker build --build-arg AIC_VERSION="$(<VERSION)" \
+#     --target wheels --output type=local,dest=./wheels .
 # The nightly-wheels GitHub workflow uses exactly this to publish the wheels.
 FROM scratch AS wheels
 COPY --from=build /wheels /

@@ -45,7 +45,13 @@
 #   KV_TRANSFER_ARG        — vLLM --kv-transfer-config arg (empty = plain vLLM baseline)
 #   HF_HOME                — host HF cache dir (default: ~/.cache/huggingface)
 #   LOG                    — host log dir (default: ../logs, i.e. /logs)
-#   IMAGE_NAME             — Docker image tag (default: rocm-aic)
+#   IMAGE_REF              — full image ref name:tag (default: rocm-aic:latest;
+#                            `make` sets it to the version-derived tag)
+#   IMAGE_NAME             — image name when IMAGE_REF is unset (default: rocm-aic)
+#   AIC_VERSION            — AIC release from the root VERSION file
+#   ROCM_VERSION           — ROCm release used by the default base image
+#   VLLM_VERSION, VLLM_ROCM_VARIANT, LMCACHE_REF, NIXL_REF, HIPFILE_SHA, HSA_SNOOP_REF
+#                          — optional framework version build-arg overrides
 #   VLLM_MODEL             — model to serve
 #   LMCACHE_PORT           — lmcache ZMQ listen port (default: 6555)
 #   LMCACHE_L1_SIZE_GB     — L1 cap in GiB (DRAM mode) or slab size (GDS mode, default: 20)
@@ -79,10 +85,18 @@ services:
       context: ..
       dockerfile: docker/Dockerfile
       args:
+        AIC_VERSION:
+        ROCM_VERSION:
         ROCM_ARCH: ${ROCM_ARCH}
         BUILD_JOBS: ${BUILD_JOBS:-}
         AIC_UCX_FAST: ${AIC_UCX_FAST:-}
-    image: ${IMAGE_NAME:-rocm-aic}
+        VLLM_VERSION:
+        VLLM_ROCM_VARIANT:
+        LMCACHE_REF:
+        NIXL_REF:
+        HIPFILE_SHA:
+        HSA_SNOOP_REF:
+    image: ${IMAGE_REF:-${IMAGE_NAME:-rocm-aic}:latest}
     container_name: aic-lmcache
     # Cross-container HIP IPC (LMCacheMPConnector registering vLLM's KV tensors) on
     # ROCm requires the two containers to share host networking + host IPC + a PID
@@ -205,7 +219,7 @@ services:
   # vllm: vLLM serve, optionally with LMCacheMPConnector (via KV_TRANSFER_ARG)
   # ---------------------------------------------------------------------------
   vllm:
-    image: ${IMAGE_NAME:-rocm-aic}
+    image: ${IMAGE_REF:-${IMAGE_NAME:-rocm-aic}:latest}
     container_name: aic-vllm-gpu${GPU:-0}
     # host net + host IPC + shared PID ns with lmcache: required for cross-container
     # HIP IPC KV registration (see the lmcache service).  kvd arms set

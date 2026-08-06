@@ -68,6 +68,15 @@ jobs:
 
       - uses: docker/setup-buildx-action@v3
 
+      - name: Compute versioned image tag
+        id: imgtag
+        run: |
+          set -euo pipefail
+          aic_version="$(< VERSION)"
+          : "${aic_version:?VERSION is missing or empty}"
+          echo "tag=$(bash docker/scripts/aic-image-tag.sh)" >> "${GITHUB_OUTPUT}"
+          echo "aic_version=${aic_version}" >> "${GITHUB_OUTPUT}"
+
       # Write the corp CA cert secret to a temp file so it can be passed as a
       # BuildKit secret (--secret id=tls_cert). The secret is never written into
       # any image layer. If CORP_CA_CERT is not set, the step is skipped and the
@@ -93,8 +102,11 @@ jobs:
           tags: |
             ${{ env.IMAGE_NAME }}:ci
             ${{ env.IMAGE_NAME }}:${{ github.sha }}
+            ${{ env.IMAGE_NAME }}:${{ steps.imgtag.outputs.tag }}
+            ${{ env.IMAGE_NAME }}:latest
           build-args: |
             ROCM_ARCH=${{ env.ROCM_ARCH }}
+            AIC_VERSION=${{ steps.imgtag.outputs.aic_version }}
           secrets: |
             ${{ steps.cert.outputs.present == 'true' && format('tls_cert={0}', steps.cert.outputs.path) || '' }}
           cache-from: type=gha,scope=aic

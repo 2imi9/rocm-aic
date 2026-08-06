@@ -16,7 +16,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "rocm-aic"
-version = "0.1.0"
+dynamic = ["version"]
 description = "AMD Infinity Context (AIC) — KV-cache cliff benchmarks and cliff chart plotter"
 requires-python = ">=3.10"
 dependencies = [
@@ -43,3 +43,6 @@ dev = ["rocm-aic[bench,plot]"]
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["benchmarks*"]
+
+[tool.setuptools.dynamic]
+version = {file = ["VERSION"]}

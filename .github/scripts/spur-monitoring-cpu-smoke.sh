@@ -17,19 +17,21 @@ set -euo pipefail
 
 SHA="${1:?usage: $0 <full-sha>}"
 SHORT="${SHA:0:7}"
-AIC_IMAGE="rocm-aic-ci-${SHORT}:latest"
+AIC_IMAGE_NAME="rocm-aic-ci-${SHORT}"
 AIC_SPUR_HOST="${AIC_SPUR_HOST:?AIC_SPUR_HOST must be set (e.g. via GitHub repo variable)}"
 AIC_SPUR_HOST="${AIC_SPUR_HOST//[$'\t\r\n ']}"
 AIC_SHARED_NFS="${AIC_SHARED_NFS:?AIC_SHARED_NFS must be set (e.g. via GitHub repo variable)}"
 AIC_SPUR_CONTROLLER="${AIC_SPUR_CONTROLLER:?AIC_SPUR_CONTROLLER must be set (e.g. via GitHub repo variable)}"
+AIC_CI_STORAGE_ROOT="${AIC_CI_STORAGE_ROOT:-}"
 AIC_SMOKE_USE_REGISTRY="${AIC_SMOKE_USE_REGISTRY:-0}"
 REPO="https://github.com/ROCm/rocm-aic.git"
 
 ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=4 "${AIC_SPUR_HOST}" env \
     SHA="${SHA}" \
     REPO="${REPO}" \
-    AIC_IMAGE="${AIC_IMAGE}" \
+    AIC_IMAGE_NAME="${AIC_IMAGE_NAME}" \
     AIC_SHARED_NFS="${AIC_SHARED_NFS}" \
+    AIC_CI_STORAGE_ROOT="${AIC_CI_STORAGE_ROOT}" \
     AIC_SPUR_CONTROLLER="${AIC_SPUR_CONTROLLER}" \
     SPUR_CONTROLLER_ADDR="${AIC_SPUR_CONTROLLER}" \
     AIC_SMOKE_USE_REGISTRY="${AIC_SMOKE_USE_REGISTRY}" \
@@ -38,9 +40,9 @@ set -euo pipefail
 
 SHORT="${SHA:0:7}"
 WORKDIR="$HOME/Projects/rocm-aic.${SHORT}"
-# $USER here is the head-node user — define paths here, not on the runner.
-TARBALL_DIR="${AIC_SHARED_NFS}/${USER}/images/aic-ci-${SHORT}"
-METRICS_PAGE_DIR="${AIC_SHARED_NFS}/${USER}/metrics-page-${SHORT}"
+CI_STORAGE_ROOT="${AIC_CI_STORAGE_ROOT:-$HOME/Projects/rocm-aic-ci}"
+TARBALL_DIR="${CI_STORAGE_ROOT}/images/aic-ci-${SHORT}"
+METRICS_PAGE_DIR="${CI_STORAGE_ROOT}/metrics-page-${SHORT}"
 HF_HOME="${AIC_SHARED_NFS}/huggingface"
 
 cleanup() {
@@ -60,6 +62,13 @@ if [[ ! -d "${WORKDIR}" || "${ACTUAL_SHA}" != "${SHA}" ]]; then
 fi
 cd "${WORKDIR}"
 git checkout "${SHA}"
+
+# Now that the tree is checked out, derive the version tag from the Dockerfile
+# pins so this stage names the image exactly as spur-dist-build.sh did.  Falling
+# back to :latest matches run-build-distribute.sh when the helper cannot resolve.
+_aic_tag="$(bash "${WORKDIR}/docker/scripts/aic-image-tag.sh" 2>/dev/null || true)"
+AIC_IMAGE="${AIC_IMAGE_NAME}:${_aic_tag:-latest}"
+echo "=== Image ref for this SHA: ${AIC_IMAGE} ==="
 
 # ---------------------------------------------------------------------------
 # Submit a CPU-only srun job
