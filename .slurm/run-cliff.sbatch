@@ -656,6 +656,7 @@ run_arm_vram() {
   log "=== Arm A (vram_only): plain vLLM (no LMCache) on :${VLLM_ENDPOINT_PORT} ==="
   export KV_TRANSFER_ARG="" # no connector -> plain VRAM-prefix-cache-only vLLM
   export GDS_MODE=""
+  export VLLM_IPC_MODE=shareable # private IPC ns; no lmcache IPC ns to join
   export VLLM_PID_MODE="" # vllm runs alone; no lmcache PID ns to join
   if ! compose up -d vllm; then
     log "Arm A: compose up vllm failed"
@@ -713,6 +714,7 @@ run_arm_kvd() { # $1=mode(nvme|gds) $2=out_csv
   local _fp=""
   [[ -n "${AIC_KV_LOAD_FAILURE_POLICY}" ]] && _fp=",\"kv_load_failure_policy\":\"${AIC_KV_LOAD_FAILURE_POLICY}\""
   export KV_TRANSFER_ARG="--kv-transfer-config '{\"kv_connector\":\"LMCacheMPConnector\",\"kv_role\":\"kv_both\"${_fp},\"kv_connector_extra_config\":{\"lmcache.mp.host\":\"tcp://localhost\",\"lmcache.mp.port\":${LMCACHE_PORT}}}'"
+  export VLLM_IPC_MODE=service:lmcache # join lmcache IPC ns for cross-container HIP IPC
   export VLLM_PID_MODE=service:lmcache # share lmcache PID ns for cross-container HIP IPC
 
   local _l2desc
