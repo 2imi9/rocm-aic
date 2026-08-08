@@ -26,8 +26,9 @@
 #   .slurm/run-build-distribute.sh     — tiny-test end-to-end serve
 #
 # The lmcache service sits behind the `cache` compose profile, so the plain
-# `vram` baseline can start `vllm` alone (`docker compose up vllm`) without
-# pulling in lmcache — vllm's depends_on uses `required: false` for that.
+# `vram` baseline can start `vllm` alone
+# (`VLLM_IPC_MODE=shareable docker compose up vllm`) without pulling in lmcache
+# — vllm's depends_on uses `required: false` for that.
 #
 # Required env:
 #   ROCM_ARCH      — e.g. gfx942
@@ -43,6 +44,9 @@
 #                            LocalDiskBackend via LMCACHE_CONFIG_FILE), or none (DRAM-only L1)
 #   LMCACHE_CONFIG_FILE_HOST — host path to an LMCache YAML config to mount (advanced; local_disk)
 #   KV_TRANSFER_ARG        — vLLM --kv-transfer-config arg (empty = plain vLLM baseline)
+#   VLLM_IPC_MODE          — vLLM IPC mode (default: service:lmcache; use shareable
+#                            when starting vllm without the lmcache service)
+#   AIC_SHM_SIZE           — private /dev/shm capacity (default: 64gb)
 #   HF_HOME                — host HF cache dir (default: ~/.cache/huggingface)
 #   LOG                    — host log dir (default: ../logs, i.e. /logs)
 #   IMAGE_REF              — full image ref name:tag (default: rocm-aic:latest;
@@ -99,14 +103,16 @@ services:
     image: ${IMAGE_REF:-${IMAGE_NAME:-rocm-aic}:latest}
     container_name: aic-lmcache
     # Cross-container HIP IPC (LMCacheMPConnector registering vLLM's KV tensors) on
-    # ROCm requires the two containers to share host networking + host IPC + a PID
-    # namespace.  lmcache owns its (default) PID namespace here; the vllm service
-    # JOINS it via `pid: service:lmcache` (see below) rather than both using host
-    # PID -- host PID makes `docker rm` hang on teardown, container-shared does not.
+    # ROCm requires the two containers to share host networking + IPC + a PID
+    # namespace.  lmcache owns shareable IPC and its default PID namespace here;
+    # the vllm service JOINS both via `ipc: service:lmcache` and
+    # `pid: service:lmcache` (see below), rather than either using host IPC/PID.
+    # Host PID makes `docker rm` hang on teardown; container-shared does not.
     # A bridge network fails IPC (hipErrorInvalidContext); host net is required.
     # Ports exposed on the host: lmcache 8080, NIXL telemetry ${NIXL_METRICS_PORT:-19090}.
     network_mode: host
-    ipc: host
+    ipc: shareable
+    shm_size: "${AIC_SHM_SIZE:-64gb}"
     cap_add:
       - CAP_SYS_ADMIN
       - SYS_PTRACE
@@ -221,13 +227,16 @@ services:
   vllm:
     image: ${IMAGE_REF:-${IMAGE_NAME:-rocm-aic}:latest}
     container_name: aic-vllm-gpu${GPU:-0}
-    # host net + host IPC + shared PID ns with lmcache: required for cross-container
-    # HIP IPC KV registration (see the lmcache service).  kvd arms set
-    # VLLM_PID_MODE=service:lmcache so vllm joins lmcache's PID namespace; the plain
-    # vram baseline leaves it empty (vllm runs alone, no lmcache to join).
+    # host net + shared IPC/PID namespaces with lmcache: required for cross-container
+    # HIP IPC KV registration (see the lmcache service).  vllm joins lmcache's
+    # shareable IPC namespace by default; cache-backed launch paths also set
+    # VLLM_PID_MODE=service:lmcache so it joins lmcache's PID namespace.  Set
+    # VLLM_IPC_MODE=shareable when starting vllm alone for the plain baseline.
     # vLLM OpenAI API + /metrics on host :8000.
     network_mode: host
-    ipc: host
+    ipc: "${VLLM_IPC_MODE:-service:lmcache}"
+    # Applied when vllm owns its IPC namespace; ignored when it joins lmcache.
+    shm_size: "${AIC_SHM_SIZE:-64gb}"
     pid: "${VLLM_PID_MODE:-}"
     cap_add:
       - CAP_SYS_ADMIN

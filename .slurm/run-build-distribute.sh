@@ -1147,6 +1147,7 @@ export LMCACHE_L1_SIZE_GB=4
 # /tmp (AIS_MT/GDS and file-based L2 need a real NVMe/GDS volume). tiny-test only
 # needs to prove the LMCacheMPConnector round-trip + serve works end-to-end.
 export AIC_L2_BACKEND=none
+export VLLM_IPC_MODE=service:lmcache
 export VLLM_PID_MODE=service:lmcache
 export KV_TRANSFER_ARG="--kv-transfer-config '{\"kv_connector\":\"LMCacheMPConnector\",\"kv_role\":\"kv_both\",\"kv_connector_extra_config\":{\"lmcache.mp.host\":\"tcp://localhost\",\"lmcache.mp.port\":6555}}'"
 mkdir -p "\${HF_HOME}" /tmp/aic-tiny-nvme /tmp/aic-tiny-nfs

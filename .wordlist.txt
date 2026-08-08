@@ -22,6 +22,7 @@ HTTPS
 HuggingFace
 Huggingface
 InfiniBand
+IPC
 JSON
 KV
 LLM
@@ -99,6 +100,7 @@ manylinux
 md
 mem
 mnt
+namespace
 nfs
 nixl
 nvme
