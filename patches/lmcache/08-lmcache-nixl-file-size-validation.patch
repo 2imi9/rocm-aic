@@ -1,10 +1,9 @@
 diff --git a/lmcache/v1/distributed/l2_adapters/nixl_store_l2_adapter.py b/lmcache/v1/distributed/l2_adapters/nixl_store_l2_adapter.py
-index 6bcde84..c551120 100644
+index bd801207..266d027 100644
 --- a/lmcache/v1/distributed/l2_adapters/nixl_store_l2_adapter.py
 +++ b/lmcache/v1/distributed/l2_adapters/nixl_store_l2_adapter.py
-@@ -178,6 +178,27 @@ class NixlStorageAgent:
-         else:
-             self.l1_align_bytes = int(backend_params["file_size"])
+@@ -173,3 +173,24 @@ class NixlStorageAgent:
+         self.l1_align_bytes = l1_memory_desc.align_bytes
  
 +        # Guard: file_size must cover at least one L1 chunk page (l1_align_bytes).
 +        # A smaller slot silently truncates stored KV chunks - the NIXL transfer
@@ -28,9 +27,7 @@ index 6bcde84..c551120 100644
 +                )
 +
          self.agent_name = "NixlAgent_" + str(uuid.uuid4())
-         nixl_conf = NixlAgentConfig(backends=[])
-         self.nixl_agent = NixlAgent(self.agent_name, nixl_conf)
-@@ -961,6 +982,18 @@ class NixlStoreL2AdapterConfig(L2AdapterConfigBase):
+@@ -949,6 +970,18 @@ class NixlStoreL2AdapterConfig(L2AdapterConfigBase):
                      "'use_direct_io' for file-based "
                      "backend %r" % backend
                  )
