@@ -179,7 +179,10 @@ services:
       # Only set when a real config file is mounted (local_disk / advanced tuning).
       - LMCACHE_CONFIG_FILE=${LMCACHE_CONFIG_FILE:-}
       - HIPFILE_ALLOW_COMPAT_MODE=false
-      - HIPFILE_UNSUPPORTED_FILE_SYSTEMS=true
+      # Keep hipFile's storage validation enabled. Bypassing it can issue direct
+      # I/O against unsupported layouts and risks data corruption.
+      - HIPFILE_UNSUPPORTED_FILE_SYSTEMS=false
+
       # NIXL native Prometheus telemetry exporter (serves /metrics on :19090).
       # Requires the prometheus-cpp plugin compiled into the image (build-nixl.sh);
       # a no-op fallback if absent.  Set NIXL_TELEMETRY_ENABLE= to disable.
