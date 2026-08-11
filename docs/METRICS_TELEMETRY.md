@@ -22,6 +22,54 @@ dashboards and recording rules apply.
 
 ---
 
+## Grafana dashboard
+
+A pre-provisioned Grafana dashboard is included in the stack.  It starts
+automatically with the `monitoring` compose profile and is accessible at
+`http://localhost:3000` with no login required (anonymous viewer access).
+
+```bash
+make up HF_TOKEN=hf_... NVME_DATA=/mnt/lmcache-nvme NFS_DATA=/mnt/lmcache-nfs \
+    VLLM_MODEL=openai/gpt-oss-120b
+# → open http://localhost:3000
+```
+
+The **AIC Overview** dashboard covers nine rows of panels with two template
+variable dropdowns (GPU ID and NVMe device):
+
+| Row | Key panels |
+| --- | --- |
+| **Summary** | Cumulative token counters (input, output, computed, L1/L2 hits), average TTFT/TPOT, total tokens/s, cache hit rates, average GPU VRAM/L1/L2 memory usage |
+| **GPU** | VRAM %, power, clocks, temperatures, GFX/UMC/MMA activity, PCIe speed |
+| **vLLM** | Throughput, TTFT/ITL/E2E latency p50+p95, KV cache usage, prefix cache hit rate, preemptions |
+| **vLLM — ISL/OSL** | Input/output sequence length distributions (p50/p95/p99), average ISL/OSL, ISL vs OSL correlation |
+| **LMCache** | L1 usage gauge, live chunk counts, L1/L2 throughput, reuse gap, in-flight L2 stores, HTTP API latency |
+| **NIXL / L2** | TX/RX throughput, prefetch hit rate (the L2 hit signal) |
+| **NVMe** | Throughput, IOPS, latency, capacity used, IO pressure (PSI) |
+| **Node / RDMA** | CPU load, memory, filesystem space, IB/RoCE throughput |
+| **hsa-snoop** | Kernel launch rate by kernel and process, duration histogram, SDMA byte throughput and copy rate |
+
+Extended rows (vLLM — Extended, LMCache — Extended, Node — Extended) are
+collapsed by default and add estimated FLOP rate, L0→L1 load throughput,
+InfiniBand counters, and system load averages.
+
+**Configuration:**
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `AIC_GRAFANA_PORT` | `3000` | Host port Grafana listens on |
+| `AIC_GRAFANA_IMAGE` | `grafana/grafana:11.5.2` | Grafana image to use |
+
+The dashboard JSON is at
+[monitoring/grafana/dashboards/aic-overview.json](../monitoring/grafana/dashboards/aic-overview.json)
+and is provisioned from disk — edits are picked up within 60 seconds without
+restarting the container.  For the host-network cliff/sbatch path
+(`make monitoring-up`) Grafana uses
+`monitoring/grafana/provisioning-host/` which points the Prometheus datasource
+at `localhost:9090` instead of `aic-prometheus:9090`.
+
+---
+
 ## LMCache metrics (`:8080`)
 
 LMCache v0.5.x exposes its Prometheus metrics through the FastAPI HTTP API
