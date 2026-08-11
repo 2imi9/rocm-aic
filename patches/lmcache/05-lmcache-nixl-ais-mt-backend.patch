@@ -3,8 +3,8 @@
 # backend into the current sharder-based pool API and threads slot_size
 # (O_DIRECT slot sizing) through createPool -> NixlFilePool.ensure_slot_sized.
 #
-# !! UNVERIFIED: applies + imports cleanly, but AIS_MT storage-backend
-#    correctness has NOT been validated on a GPU.  Needs a real hipFile run.
+# Verified on gfx942 with a forced hipFile compatibility-mode, multi-slot
+# VRAM-to-file round trip. The P2PDMA fast path remains unverified.
 #
 diff --git a/lmcache/v1/storage_backend/nixl_storage_backend.py b/lmcache/v1/storage_backend/nixl_storage_backend.py
 index 0064f262..a228480e 100644
@@ -38,7 +38,7 @@ index 0064f262..a228480e 100644
              self.fds.append(fd)
  
 +    def _fd_for_index(self, index: int) -> int:
-+        return self.fds[self.size - 1 - index]
++        return self.fds[index]
 +
 +    def ensure_slot_sized(self, index: int) -> None:
 +        """Size a pool file before the first O_DIRECT transfer to that slot."""
@@ -105,3 +105,71 @@ index 0064f262..a228480e 100644
          handle = self.agent.get_mem_to_storage_handle(mem_indices, storage_indices)
          self.agent.post_blocking(handle)
          self.agent.release_handle(handle)
+diff --git a/tests/disagg/test_nixl_file_pool_slot_sizing.py b/tests/disagg/test_nixl_file_pool_slot_sizing.py
+new file mode 100644
+--- /dev/null
++++ b/tests/disagg/test_nixl_file_pool_slot_sizing.py
+@@ -0,0 +1,63 @@
++# SPDX-License-Identifier: Apache-2.0
++
++# Standard
++from types import SimpleNamespace
++import os
++
++# Third Party
++import pytest
++
++pytest.importorskip("nixl", reason="nixl package is required for nixl tests")
++
++# First Party
++from lmcache.v1.storage_backend.nixl_storage_backend import (
++    NixlFilePool,
++    NixlStaticStorageAgent,
++    NixlStorageAgent,
++)
++
++
++def test_slot_sizing_matches_registered_descriptor_order(monkeypatch):
++    """Transfer index i must size the file registered at descriptor i."""
++    opened_fds = iter((101, 202, 303))
++    registered_fds: list[int] = []
++    sized: list[tuple[int, int]] = []
++
++    monkeypatch.setattr(
++        os,
++        "open",
++        lambda _path, _flags: next(opened_fds),
++    )
++    monkeypatch.setattr(os, "fstat", lambda _fd: SimpleNamespace(st_size=0))
++    monkeypatch.setattr(
++        os, "ftruncate", lambda fd, size: sized.append((fd, size))
++    )
++
++    pool = NixlFilePool(
++        size=3,
++        sharder=SimpleNamespace(selected="/unused"),
++        use_direct_io=True,
++        slot_size=4096,
++    )
++
++    monkeypatch.setattr(NixlStorageAgent, "__init__", lambda *_args, **_kwargs: None)
++    monkeypatch.setattr(
++        NixlStaticStorageAgent,
++        "init_storage_handlers_file",
++        lambda _self, _page_size, fds: registered_fds.extend(fds),
++    )
++    NixlStaticStorageAgent(
++        allocator=SimpleNamespace(align_bytes=4096),
++        pool=pool,
++        device="cpu",
++        backend="AIS_MT",
++        backend_params={},
++        enable_prog_thread=False,
++    )
++
++    pool.ensure_slot_sized(0)
++    pool.ensure_slot_sized(2)
++    pool.ensure_slot_sized(0)
++
++    assert registered_fds == pool.fds
++    assert sized == [(registered_fds[0], 4096), (registered_fds[2], 4096)]

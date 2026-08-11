@@ -161,6 +161,28 @@ fi
 # knob (built in the compose-stack setup block below).  Empty => no scaling.
 LMCACHE_L1_SIZE_GB="${LMCACHE_L1_SIZE_GB:-20}"
 LMCACHE_NVME_POOL="${LMCACHE_NVME_POOL:-4096}"
+# POSIX-specific slot size and pool (separate from AIS_MT's 256 MiB staging buffer).
+# file_size for POSIX = actual KV chunk bytes (~9 MiB for gpt-oss-120b fp8 chunk_size=256);
+# 16 MiB gives headroom.  Pool must cover c×chunks: 250×71=17,750 -> default 32768.
+# Parallel POSIX writers: default 1 GPU worker serializes all POSIX writes on ZMQ.
+LMCACHE_NIXL_POSIX_SLOT_SIZE="${LMCACHE_NIXL_POSIX_SLOT_SIZE:-16777216}"
+# Post-warmup drain sleep: time in seconds to wait after the per-c warmup wave
+# before starting timed iters.  Must be long enough for async POSIX writes to
+# land on disk so iter 0 sees a warm, unsaturated cache.  Default 300 s is sized
+# for c=32 per-client with workers=1; reduce for shared prefix or more workers.
+# Post-warmup drain: time (s) for async POSIX writes to land on disk before
+# measuring.  The XFS LVM uses buffered I/O (page cache) so dirty pages flush
+# in seconds.  10s is ample; 300s was a conservative over-estimate.
+POST_WARMUP_SLEEP_S="${POST_WARMUP_SLEEP_S:-10}"
+LMCACHE_NIXL_POSIX_POOL="${LMCACHE_NIXL_POSIX_POOL:-32768}"
+LMCACHE_MAX_GPU_WORKERS="${LMCACHE_MAX_GPU_WORKERS:-1}"
+# Cap concurrent NIXL POSIX load tasks.  At high concurrency the NIXL descriptor pool
+# exhausts and makeXferReq throws NIXL_ERR_INVALID_PARAM; limiting in-flight prefetches
+# to 4 keeps the pool from saturating while still overlapping L2 reads.
+# Raise prefetch in-flight: with _xfer_handle_lock (patch 09) the NIXL descriptor
+# pool is protected, so more concurrent reads are safe.  At 4 in-flight and c=32
+# it takes ~200s to prefetch all chunks; at 32 in-flight it should take ~25s.
+LMCACHE_L2_PREFETCH_MAX_IN_FLIGHT="${LMCACHE_L2_PREFETCH_MAX_IN_FLIGHT:-32}"
 # CPU DRAM (L1) tier for the nvme arm.  Default 'false' = KV flows GPU VRAM
 # staging -> NVMe (no host DRAM tier).  Set AIC_LOCAL_CPU=true to add an LMCache
 # DRAM L1 in front of the NIXL NVMe L2 (a proper DRAM->NVMe tiered cache);
@@ -256,6 +278,10 @@ PLOTS="${LOGDIR}/plots"
 AIC_MONITORING="${AIC_MONITORING:-1}"
 AIC_METRICS_DIR="${AIC_METRICS_DIR:-${REPO}/logs/${SLURM_JOB_ID:-manual}/prometheus}"
 AIC_EXPORTERS="${AIC_EXPORTERS:-1}"
+# hsa-snoop PID mode: 'host' (default non-SPUR) requires --pid=host which is blocked by
+# spur-authz on SPUR nodes.  'container:aic-lmcache' shares the lmcache+vLLM PID ns
+# instead -- valid because vllm uses pid:service:lmcache so both processes are visible.
+AIC_HSA_SNOOP_PID_MODE="${AIC_HSA_SNOOP_PID_MODE:-host}"
 MON_COMPOSE="${REPO}/monitoring/docker-compose.monitoring.yml"
 MON_DIR="${REPO}/monitoring"
 
@@ -441,8 +467,34 @@ command -v docker >/dev/null 2>&1 || die "docker not found on $(hostname)"
 
 # Pre-create the compose log-mount dirs too, so docker doesn't auto-create them
 # as root under the per-job logs tree (the lmcache/vllm services bind-mount these).
-mkdir -p "${RESULTS}" "${PLOTS}" "${NVME_DATA}" "${NFS_DATA}" "${GDS_SLAB_DATA}" \
-  "${LOGDIR}/lmcache" "${LOGDIR}/vllm"
+# The per-job log dirs are always under REPO (writable).  The NVMe/slab paths may
+# live under a shared LVM (e.g. SPUR /mnt/m2m_nobackup) owned by root -- try plain
+# mkdir first; fall back to sudo -n (passwordless) if that fails so the first job
+# on a freshly imaged node doesn't abort when the caller-pinned path doesn't exist.
+_mkdir_shared() {
+    local d
+    for d in "$@"; do
+        mkdir -p "${d}" 2>/dev/null && continue
+        sudo -n mkdir -p "${d}" 2>/dev/null \
+            && { sudo -n chown "$(id -u):$(id -g)" "${d}" 2>/dev/null || true; continue; }
+        log "WARN: could not create ${d} (mkdir failed; no passwordless sudo?)"
+    done
+}
+mkdir -p "${RESULTS}" "${PLOTS}" "${LOGDIR}/lmcache" "${LOGDIR}/vllm"
+_mkdir_shared "${NVME_DATA}" "${NVME_DATA}/lmcache" "${NFS_DATA}" "${GDS_SLAB_DATA}"
+# Clean up leftover NIXL POSIX slot files from previous runs.  The NIXL POSIX
+# backend scans the directory on create_backend(); with tens of thousands of
+# stale .bin files from prior jobs the backend enters a bad state and
+# prep_xfer_dlist fails with NIXL_ERR_NOT_FOUND even though the directory exists.
+if [[ -d "${NVME_DATA}/lmcache" ]]; then
+    _slot_count=$(ls "${NVME_DATA}/lmcache" 2>/dev/null | wc -l)
+    if [[ "${_slot_count}" -gt 0 ]]; then
+        log "cleaning ${_slot_count} leftover NIXL slot files from ${NVME_DATA}/lmcache"
+        sudo -n find "${NVME_DATA}/lmcache" -maxdepth 1 -name "*.bin" -delete 2>/dev/null \
+            || find "${NVME_DATA}/lmcache" -maxdepth 1 -name "*.bin" -delete 2>/dev/null \
+            || log "WARN: could not clean slot files (no write permission?)"
+    fi
+fi
 [[ -d "${HF_HOME}/hub" ]] || die "HF cache not found at ${HF_HOME}/hub"
 
 # --- Load images from shared tarballs when needed ----------------------------
@@ -491,13 +543,15 @@ load_image_if_needed() {
 _img_base="$(printf '%s' "${AIC_IMAGE}" | tr '/:' '--')"
 load_image_if_needed "${AIC_IMAGE}" "${AIC_IMAGE_DIR}/${_img_base}-*.tar.*" required
 
-# Fabric exporter images (optional).  When metrics exporters are on and the user
-# has not pinned an explicit image, try the distributed tarball (built by
-# run-build-distribute.sh build-exporters) and point the monitoring sidecar at it
-# ONLY when the image is actually present.  On a node with the batesste host
-# service the container is port-skipped anyway; with neither, node-exporter's
-# nvme/infiniband collectors still cover it -- see _monitoring_run_up.
-if [[ "${AIC_EXPORTERS}" == "1" ]]; then
+# Monitoring sidecar images.  Load from the shared NFS tarball when present so
+# compose never needs Docker Hub egress on a cold node.  Applies for all non-zero
+# AIC_EXPORTERS modes (safe and 1).  Images are named by their Docker Hub tag
+# with '/:' → '--' so they match the tarball filenames saved by dist-build.
+# On a node with the batesste host service the fabric containers are port-skipped
+# anyway; with neither, node-exporter's nvme/infiniband collectors still cover it
+# -- see _monitoring_run_up.
+if [[ "${AIC_EXPORTERS}" != "0" ]]; then
+  # nvme/rdma fabric exporters (built by run-build-distribute.sh build-exporters)
   if [[ -z "${AIC_NVME_EXPORTER_IMAGE:-}" ]]; then
     _t="aic-nvme-exporter:latest"
     _b="$(printf '%s' "${_t}" | tr '/:' '--')"
@@ -507,6 +561,20 @@ if [[ "${AIC_EXPORTERS}" == "1" ]]; then
     _t="aic-rdma-exporter:latest"
     _b="$(printf '%s' "${_t}" | tr '/:' '--')"
     load_image_if_needed "${_t}" "${AIC_IMAGE_DIR}/${_b}.tar.*" && export AIC_RDMA_EXPORTER_IMAGE="${_t}"
+  fi
+  # AMD GPU device-metrics-exporter (rocm/device-metrics-exporter:v1.5.1).
+  # Tarball saved to AIC_IMAGE_DIR by dist-build-exporters or manually.
+  if [[ -z "${AIC_AMDGPU_EXPORTER_IMAGE:-}" ]]; then
+    _t="${AIC_AMDGPU_EXPORTER_IMAGE_DEFAULT:-rocm/device-metrics-exporter:v1.5.1}"
+    _b="$(printf '%s' "${_t}" | tr '/:' '--')"
+    load_image_if_needed "${_t}" "${AIC_IMAGE_DIR}/${_b}.tar.*" && export AIC_AMDGPU_EXPORTER_IMAGE="${_t}"
+  fi
+  # Prometheus (prom/prometheus:v2.55.1).  Pre-pull avoids 10+ min Docker Hub
+  # download on fresh nodes; load_image_if_needed is a no-op when already present.
+  if [[ -z "${AIC_PROM_IMAGE:-}" ]]; then
+    _t="prom/prometheus:v2.55.1"
+    _b="$(printf '%s' "${_t}" | tr '/:' '--')"
+    load_image_if_needed "${_t}" "${AIC_IMAGE_DIR}/${_b}.tar.*" || true
   fi
 fi
 
@@ -518,6 +586,7 @@ fi
 HF_ENV=(-e HF_HOME=/hf -e HF_HUB_CACHE=/hf/hub -e HF_HUB_OFFLINE=1
   -e TRANSFORMERS_OFFLINE=1 -e VLLM_CACHE_ROOT=/hf/vllm
   -e ROCR_VISIBLE_DEVICES=0 -e PYTHONHASHSEED=0
+  -e VLLM_TARGET_DEVICE=rocm
   -e AMDGCN_USE_BUFFER_OPS=0 -e MIOPEN_FIND_MODE=FAST
   # AITER unified attention: required so a KV connector (LMCache) can unify
   # gpt-oss's hybrid (sliding-window + full) KV-cache specs.  Without
@@ -555,12 +624,16 @@ export AIC_ROCM_USE_AITER
 export LMCACHE_PORT LMCACHE_NVME_POOL LMCACHE_NFS_POOL
 export LMCACHE_NVME_SLOT_SIZE="${LMCACHE_NVME_SLOT_SIZE:-268435456}"
 export AIC_NIXL_USE_DIRECT_IO
+export AIC_NIXL_BACKEND
+export LMCACHE_NIXL_POSIX_SLOT_SIZE LMCACHE_NIXL_POSIX_POOL LMCACHE_MAX_GPU_WORKERS LMCACHE_L2_PREFETCH_MAX_IN_FLIGHT
 export NIXL_METRICS_PORT="${NIXL_METRICS_PORT:-19090}"
+export AIC_HSA_SNOOP_PID_MODE
 # RoPE override (YaRN etc.) applied to ALL arms via vLLM --hf-overrides.  Single-
 # quote the JSON so compose's shlex splitting keeps the inner double quotes.
 VLLM_EXTRA_ARGS=""
 [[ -n "${VLM_ROPE_SCALING}" ]] && VLLM_EXTRA_ARGS="--hf-overrides '{\"rope_scaling\": ${VLM_ROPE_SCALING}}'"
 export VLLM_EXTRA_ARGS
+export VLLM_LOGGING_LEVEL="${VLLM_LOGGING_LEVEL:-WARNING}"
 # The MP server's --l1-size-gb is the DRAM L1 (nvme arm) OR the hipFile slab size
 # (gds arm).  The cliff sizes these from two different knobs, so preserve the
 # original LMCACHE_L1_SIZE_GB (the gds slab) here and derive the nvme DRAM L1 from
@@ -713,7 +786,15 @@ run_arm_kvd() { # $1=mode(nvme|gds) $2=out_csv
   # the JSON so compose's shlex splitting preserves the inner double quotes.
   local _fp=""
   [[ -n "${AIC_KV_LOAD_FAILURE_POLICY}" ]] && _fp=",\"kv_load_failure_policy\":\"${AIC_KV_LOAD_FAILURE_POLICY}\""
-  export KV_TRANSFER_ARG="--kv-transfer-config '{\"kv_connector\":\"LMCacheMPConnector\",\"kv_role\":\"kv_both\"${_fp},\"kv_connector_extra_config\":{\"lmcache.mp.host\":\"tcp://localhost\",\"lmcache.mp.port\":${LMCACHE_PORT}}}'"
+  # heartbeat_interval: lmcache pings the server every N seconds to detect crashes.
+  # Default 10s means a single missed ping during POSIX write-queue saturation triggers
+  # an unhealthy→recovery cycle which rebuilds IPC handles and causes a stale-handle
+  # crash (hipErrorInvalidValue) in any in-flight future from the pre-recovery session.
+  # Set high enough that transient write delays (warmup at c=32: up to 600s) don't
+  # falsely trigger recovery. Real crashes will still be detected once vLLM stops
+  # responding entirely (the ZMQ channel closes cleanly on process exit).
+  local _hb="${LMCACHE_HEARTBEAT_INTERVAL:-900}"
+  export KV_TRANSFER_ARG="--kv-transfer-config '{\"kv_connector\":\"LMCacheMPConnector\",\"kv_role\":\"kv_both\"${_fp},\"kv_connector_extra_config\":{\"lmcache.mp.host\":\"tcp://localhost\",\"lmcache.mp.port\":${LMCACHE_PORT},\"lmcache.mp.heartbeat_interval\":${_hb}}}'"
   export VLLM_IPC_MODE=service:lmcache # join lmcache IPC ns for cross-container HIP IPC
   export VLLM_PID_MODE=service:lmcache # share lmcache PID ns for cross-container HIP IPC
 
@@ -742,7 +823,11 @@ run_arm_kvd() { # $1=mode(nvme|gds) $2=out_csv
       _l2desc="LMCache native LocalDiskBackend L2 (POSIX, $([[ "${AIC_L2_ODIRECT}" == true ]] && echo O_DIRECT || echo buffered), DRAM L1 ${LMCACHE_L1_SIZE_GB}GB)"
     else
       unset LMCACHE_CONFIG_FILE LMCACHE_CONFIG_FILE_HOST
-      _l2desc="NIXL AIS_MT NVMe L2 + POSIX L2b (DRAM L1 ${LMCACHE_L1_SIZE_GB}GB, pool ${LMCACHE_NVME_POOL})"
+      if [[ "${AIC_NIXL_BACKEND}" == "POSIX" ]]; then
+        _l2desc="NIXL POSIX NVMe L2 (DRAM L1 ${LMCACHE_L1_SIZE_GB}GB, pool ${LMCACHE_NIXL_POSIX_POOL}, slot $(( LMCACHE_NIXL_POSIX_SLOT_SIZE / 1048576 ))MiB, workers=${LMCACHE_MAX_GPU_WORKERS})"
+      else
+        _l2desc="NIXL AIS_MT NVMe L2 + POSIX L2b (DRAM L1 ${LMCACHE_L1_SIZE_GB}GB, pool ${LMCACHE_NVME_POOL})"
+      fi
     fi
   fi
   log "  stack: standalone lmcache server (${_l2desc}) + vLLM LMCacheMPConnector on :${VLLM_ENDPOINT_PORT}"
@@ -763,9 +848,28 @@ run_arm_kvd() { # $1=mode(nvme|gds) $2=out_csv
     stop_stack
     return 1
   fi
+  # Continuous container log streaming: capture lmcache + vllm stdout into
+  # per-run log files with timestamps throughout the arm, not just at teardown.
+  # The background tail is killed by stop_stack via the containers being removed.
+  log "streaming container logs -> ${LOGDIR}/lmcache/ and ${LOGDIR}/vllm/"
+  mkdir -p "${LOGDIR}/lmcache" "${LOGDIR}/vllm"
+  docker logs -f --timestamps aic-lmcache \
+    >>"${LOGDIR}/lmcache/lmcache-stream.log" 2>&1 &
+  _lmcache_log_pid=$!
+  docker logs -f --timestamps aic-vllm-gpu0 \
+    >>"${LOGDIR}/vllm/vllm-stream.log" 2>&1 &
+  _vllm_log_pid=$!
+
   # Per-c warmup + drain: required for per_client mode and async-save kvd.
-  run_bench kvd_v2 "${VLLM_ENDPOINT_PORT}" "${out}" --warmup-at-each-c --post-warmup-sleep-s 5
+  # post-warmup-sleep must cover the full POSIX write queue drain time for the
+  # current concurrency.  With workers=1 (serialised) and c=32 per-client,
+  # warmup writes take ~450 s; 300 s gives the queue time to mostly drain so
+  # iter 0 sees a warm, settled cache rather than write-queue back-pressure.
+  # Override via POST_WARMUP_SLEEP_S env if a different c or worker count is used.
+  run_bench kvd_v2 "${VLLM_ENDPOINT_PORT}" "${out}" --warmup-at-each-c \
+    --post-warmup-sleep-s "${POST_WARMUP_SLEEP_S:-300}"
   local rc=$?
+  kill "${_lmcache_log_pid}" "${_vllm_log_pid}" 2>/dev/null || true
   stop_stack
   return $rc
 }
@@ -776,6 +880,14 @@ run_arm_kvd() { # $1=mode(nvme|gds) $2=out_csv
 KVD_NVME_CSV="${RESULTS}/cliff-kvd_v2-nvme-${STAMP}.csv"
 KVD_GDS_CSV="${RESULTS}/cliff-kvd_v2-gds-${STAMP}.csv"
 declare -A STATUS
+
+# Pre-pull the Prometheus image so start_monitoring doesn't block on a Docker Hub
+# download (prom/prometheus is ~75 MB; on a cold node this adds 10+ minutes before
+# the first arm starts).  docker pull is a no-op when the image is already present.
+_prom_img="${AIC_PROM_IMAGE:-prom/prometheus:v2.55.1}"
+log "pre-pulling ${_prom_img} (no-op if cached)..."
+docker pull "${_prom_img}" >/dev/null 2>&1 && log "  ${_prom_img}: ready" \
+    || log "  WARN: pull failed for ${_prom_img} (will try again at compose up)"
 
 # Bring up the Prometheus metrics-capture sidecar before the first arm so it
 # scrapes the whole sweep; torn down via the EXIT trap (TSDB retained on NFS).
@@ -794,7 +906,12 @@ log "isl/prefix  : ISL=${BENCH_ISL} shared=${BENCH_SHARED_TOK} max_model_len=${V
 # collapse in jobs 67536798/67537066 — the LMCACHE_NVME_POOL override didn't land).
 # In MP mode the DRAM L1 is --l1-size-gb (nvme arm: max_local_cpu_size when
 # local_cpu=true, else the default) and the slab is --l1-size-gb (gds arm).
-log "tiers       : l2_backend=${AIC_L2_BACKEND} local_cpu=${AIC_LOCAL_CPU} dram_l1(nvme)=${LMCACHE_MAX_LOCAL_CPU_SIZE}GB nvme_pool=${LMCACHE_NVME_POOL} slots (~$((LMCACHE_NVME_POOL * 45 / 10 / 1024)) GiB) gds_slab=${AIC_GDS_SLAB_GB}GB local_disk=${AIC_LOCAL_DISK_SIZE_GB}GB(odirect=${AIC_L2_ODIRECT})"
+if [[ "${AIC_NIXL_BACKEND}" == "POSIX" ]]; then
+  _nvme_pool_log="${LMCACHE_NIXL_POSIX_POOL} slots slot_size=$((LMCACHE_NIXL_POSIX_SLOT_SIZE / 1048576))MiB workers=${LMCACHE_MAX_GPU_WORKERS}"
+else
+  _nvme_pool_log="${LMCACHE_NVME_POOL} slots (~$((LMCACHE_NVME_POOL * 45 / 10 / 1024)) GiB)"
+fi
+log "tiers       : l2_backend=${AIC_L2_BACKEND} nixl_backend=${AIC_NIXL_BACKEND} local_cpu=${AIC_LOCAL_CPU} dram_l1(nvme)=${LMCACHE_MAX_LOCAL_CPU_SIZE}GB nvme_pool=${_nvme_pool_log} gds_slab=${AIC_GDS_SLAB_GB}GB local_disk=${AIC_LOCAL_DISK_SIZE_GB}GB(odirect=${AIC_L2_ODIRECT})"
 
 if _arm_on vram; then run_arm_vram && STATUS[vram_only]=ok || STATUS[vram_only]=FAIL; else STATUS[vram_only]=skip; fi
 if _arm_on nvme; then run_arm_kvd nvme "${KVD_NVME_CSV}" && STATUS[kvd_nvme]=ok || STATUS[kvd_nvme]=FAIL; else STATUS[kvd_nvme]=skip; fi

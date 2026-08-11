@@ -148,35 +148,14 @@ jobs:
       - name: Compose release notes
         run: |
           set -euo pipefail
-          df="docker/Dockerfile"
-          get() { grep -E "^ARG $1=" "$df" | head -1 | cut -d= -f2-; }
-          tag="${{ github.ref_name }}"
-          {
-            echo "Stable release of the **AMD Infinity Context (AIC)** patched stack."
-            echo ""
-            echo "- **Tag:** \`${tag}\`"
-            echo "- **Source SHA:** \`${{ github.sha }}\`"
-            echo "- **GPU arch set:** \`${ROCM_ARCH}\`"
-            echo "- **Base:** rocm/dev-ubuntu-24.04:7.2.4-complete (ROCm 7.2.4, Python 3.12, x86_64)"
-            echo "- **LMCache:** $(get LMCACHE_GIT_URL) @ \`$(get LMCACHE_SHA)\` + AIC patches"
-            echo "- **NIXL:** $(get NIXL_GIT_URL) @ \`$(get NIXL_SHA)\` + nixl-rocm-ais-mt patch"
-            echo ""
-            echo "### Install wheels"
-            echo '```bash'
-            echo "pip install \\"
-            echo "  https://github.com/${GITHUB_REPOSITORY}/releases/download/${tag}/<lmcache-wheel> \\"
-            echo "  https://github.com/${GITHUB_REPOSITORY}/releases/download/${tag}/<nixl_rocm-wheel>"
-            echo '```'
-            echo ""
-            echo "### Docker"
-            echo '```bash'
-            echo "docker pull ${IMAGE_NAME}:${tag}"
-            echo '```'
-            echo ""
-            echo "> These wheels are **not** manylinux: ROCm 7.2.x + Python 3.12 + x86_64 only."
-            echo "> The \`nixl_rocm\` wheel needs the ROCm runtime (libamdhip64) and hipFile"
-            echo "> present on the host; see README.md."
-          } > release-notes.md
+          bash .github/scripts/render-release-notes.sh \
+            docker/Dockerfile \
+            "${{ github.ref_name }}" \
+            "${{ github.sha }}" \
+            "${ROCM_ARCH}" \
+            "${IMAGE_NAME}" \
+            "${GITHUB_REPOSITORY}" \
+            > release-notes.md
           cat release-notes.md
 
       - name: Publish GitHub Release
