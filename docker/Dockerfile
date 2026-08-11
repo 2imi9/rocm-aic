@@ -2,13 +2,13 @@
 #
 # SPDX-License-Identifier: MIT
 #
-# AIC: Ubuntu 24.04 + ROCm inference stack.
+# AIC: Ubuntu 24.04 + ROCm 7.14 inference stack.
 #
-#   Base image: rocm/dev-ubuntu-24.04:${ROCM_VERSION}-complete  (Ubuntu 24.04, Python 3.12)
-#   vLLM:       installed from pre-built ROCm wheel (bundles its own torch/triton/flash-attn)
-#   LMCache:    LMCache/LMCache v0.5.2 release + 8 AMD patches
-#   hipFile:    ROCm/rocm-systems (GDS/P2PDMA NVMe transfers)
-#   NIXL:       ai-dynamo/nixl v1.3.2 release + nixl-rocm-ais-mt.patch (ROCm/HIP + AIS_MT)
+#   Base image: rocm/dev-ubuntu-24.04:${ROCM_VERSION}-full  (Ubuntu 24.04, Python 3.12)
+#   vLLM:       built from source at ${VLLM_REF} (torch 2.13.0+rocm7.2 from pytorch.org)
+#   LMCache:    LMCache/LMCache ${LMCACHE_REF} + AMD patches from patches/lmcache/
+#   hipFile:    included in the ROCm 7.14 base image (GA since 7.14) — no source build needed
+#   NIXL:       ai-dynamo/nixl ${NIXL_REF} + nixl-rocm-ais-mt.patch (ROCm/HIP + AIS_MT)
 #
 # Two compose services share this single image:
 #   lmcache — standalone lmcache-server (MP mode)
@@ -40,8 +40,8 @@
 # its upstream checkout during the build, in lexical (filename) order -- hence
 # the NN- prefixes.  Drop a new NN-*.patch into the directory to include it.
 #
-# Wheels: the build also produces pip-installable wheels for the patched LMCache
-# and ROCm NIXL under /wheels.  Extract them with the `wheels` stage:
+# Wheels: the build also produces pip-installable wheels for vLLM (source-built),
+# the patched LMCache, and ROCm NIXL under /wheels.  Extract them with the `wheels` stage:
 #   docker build --build-arg AIC_VERSION="$(<VERSION)" \
 #     --target wheels --output type=local,dest=./wheels .
 # (the default target remains the full runtime image -- see stages 8/9 below).
@@ -51,34 +51,29 @@
 # the default target -- identical to `build`, so existing `docker build` callers
 # are unaffected).  Publishing wheels: `docker build --target wheels
 # --output type=local,dest=<dir>` extracts /wheels without loading the image.
-ARG ROCM_VERSION=7.2.4
-ARG ROCM_BASE_IMAGE=rocm/dev-ubuntu-24.04:${ROCM_VERSION}-complete
+ARG ROCM_VERSION=7.14.0
+# ROCm 7.14 publishes the hipFile-bearing variant as `-full` (not `-complete`).
+ARG ROCM_BASE_IMAGE=rocm/dev-ubuntu-24.04:${ROCM_VERSION}-full
 # ROCM_BASE_IMAGE has a tagged default but remains overridable by callers.
 # hadolint ignore=DL3006
 FROM ${ROCM_BASE_IMAGE} AS build
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
-ARG AIC_VERSION
 ARG ROCM_VERSION
 ARG ROCM_BASE_IMAGE
 ARG ROCM_ARCH
-RUN { test -n "$AIC_VERSION" || { echo "ERROR: AIC_VERSION is not set (read it from VERSION)"; exit 1; }; } && \
-    { test -n "$ROCM_ARCH" || { echo "ERROR: ROCM_ARCH is not set"; exit 1; }; }
 
-# Parallel compile jobs for the C++/HIP source builds below (LMCache, hipFile,
-# hsa-snoop). Defaults to $(nproc).
+# Parallel compile jobs for the C++/HIP source builds below (LMCache, hsa-snoop).
+# Defaults to $(nproc).
 ARG BUILD_JOBS=
 
-# vLLM wheel version on wheels.vllm.ai.  rocm723 = ROCm 7.2.3, Python 3.12 --
-# pinned to 0.25.0 until the 0.26.0+rocm723 wheel is published on wheels.vllm.ai.
-# Check https://wheels.vllm.ai/rocm/<version>/ for the variant tag on version bumps.
-ARG VLLM_VERSION=0.25.0
-ARG VLLM_ROCM_VARIANT=rocm723
+# vLLM: built from source at this tag.  Check https://github.com/vllm-project/vllm/tags
+# for the latest release; bump VLLM_REF and rebuild when updating.
+ARG VLLM_GIT_URL=https://github.com/vllm-project/vllm.git
+ARG VLLM_REF=v0.26.0
 
 # Pinned component revisions — bump together when validating a new combo.
-# ROCm/rocm-systems develop HEAD (2026-07-13); default branch is 'develop'.
-ARG HIPFILE_SHA=6901b670c3e186f9c7052d6fc9748f0286536bdc
 # ai-dynamo/nixl release tag + nixl-rocm-ais-mt.patch (ROCm/HIP + AIS_MT).
 # The patch is AIS_MT-only (it no longer relocates upstream GDS_MT), so it applies
 # cleanly on both v1.3.0 and v1.3.1 -- bump NIXL_REF and re-run the patch --check.
@@ -89,24 +84,14 @@ ARG NIXL_REF=v1.3.2
 ARG HSA_SNOOP_GIT_URL=https://github.com/sbates130272/hsa-snoop.git
 ARG HSA_SNOOP_REF=v1.0.0
 
-# LMCache: upstream repo, pinned to the v0.5.2 release tag.
-# All 8 AMD patches in patches/lmcache/ apply cleanly against this tag.
+# LMCache: upstream repo, pinned to the v0.5.3 release tag.
+# All 12 AMD patches in patches/lmcache/ apply cleanly against this tag.
 # Note: LMCache v0.5.2+ is required for vLLM >= 0.26.0.
 ARG LMCACHE_GIT_URL=https://github.com/LMCache/LMCache.git
-ARG LMCACHE_REF=v0.5.2
+ARG LMCACHE_REF=v0.5.3
 
-# Provide image metadata that can be viewed from `docker inspect`.
-LABEL org.opencontainers.image.title="rocm-aic" \
-      org.opencontainers.image.description="AMD Infinity Context: ROCm vLLM + LMCache tiered-cache inference stack" \
-      org.opencontainers.image.version="${AIC_VERSION}" \
-      org.opencontainers.image.base.name="${ROCM_BASE_IMAGE}" \
-      ai.amd.aic.version="${AIC_VERSION}" \
-      ai.amd.aic.rocm="${ROCM_VERSION}" \
-      ai.amd.aic.vllm="${VLLM_VERSION}+${VLLM_ROCM_VARIANT}" \
-      ai.amd.aic.lmcache="${LMCACHE_REF}" \
-      ai.amd.aic.nixl="${NIXL_REF}" \
-      ai.amd.aic.hipfile="${HIPFILE_SHA}" \
-      ai.amd.aic.hsa-snoop="${HSA_SNOOP_REF}"
+# Optional: enable UCX fast-path for NIXL (default off).
+ARG AIC_UCX_FAST=
 
 # ----- 0. Corporate CA (optional, Zscaler/AMD) --------------------------------
 # Pass a CA cert at build time via BuildKit secret to reach HTTPS through a
@@ -130,31 +115,38 @@ RUN --mount=type=secret,id=tls_cert,required=false \
 # actually persists.  `sharing=locked` serializes concurrent builds on the mount.
 #
 # libboost-dev (headers only) rather than libboost-all-dev: none of our C++
-# components (NIXL, hipFile, hsa-snoop) declare a boost dependency, and the full
+# components (NIXL, hsa-snoop) declare a boost dependency, and the full
 # metapackage drags in libboost-mpi-dev -> openmpi-bin/-dev + gfortran + automake,
 # which emit a raft of update-alternatives man-page warnings and bloat the image.
 # Headers stay available for any transitive #include.
 #
-# libopenmpi3t64 (openmpi RUNTIME libs) is required on its own, though: the ROCm
-# torch bundled in the vLLM wheel has a hard NEEDED on libmpi_cxx.so.40, loaded
-# via torch._load_global_deps() on `import torch` -- it was previously satisfied
-# incidentally by libboost-all-dev pulling openmpi.  We add just the runtime lib
-# (not openmpi-bin/-dev), so torch imports but the mpirun/mpicc alternatives that
-# caused the warnings are never registered.
+# libopenmpi3t64 (openmpi RUNTIME libs) is required on its own: ROCm torch wheels
+# have a hard NEEDED on libmpi_cxx.so.40, loaded via torch._load_global_deps() on
+# `import torch`.  We add just the runtime lib (not openmpi-bin/-dev), so torch
+# imports cleanly without registering the mpirun/mpicc alternatives that caused
+# warnings before.
+#
+# ccache is used to accelerate repeated vLLM HIP/C++ compilations across rebuilds.
+# libsqlite3-dev, libfmt-dev, libmsgpack-dev are required by vLLM's C++ extensions.
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
     rm -f /etc/apt/apt.conf.d/docker-clean && \
     apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         ca-certificates \
+        ccache \
         cmake \
         curl \
         git \
         libboost-dev \
+        libdrm-dev \
+        libfmt-dev \
         libibverbs-dev \
         ibverbs-providers \
         libmount-dev \
+        libmsgpack-dev \
         libopenmpi3t64 \
+        libsqlite3-dev \
         ninja-build \
         nvme-cli \
         pkg-config \
@@ -184,25 +176,102 @@ ENV PIP_ROOT_USER_ACTION=ignore \
     UV_LINK_MODE=copy
 
 # ----- 2. uv (fast Python package manager) + pip bootstrap ------------------
-RUN curl -fsSL https://astral.sh/uv/install.sh | sh && \
+# Pin UV_VERSION so the install URL is deterministic and the layer caches
+# across builds.  Bump when upgrading uv.
+ARG UV_VERSION=0.7.20
+RUN curl -fsSL "https://astral.sh/uv/${UV_VERSION}/install.sh" | sh && \
     ln -s /root/.local/bin/uv /usr/local/bin/uv && \
     ln -s /root/.local/bin/uvx /usr/local/bin/uvx
 
-# ----- 3. vLLM (pre-built ROCm wheel — bundles its own torch/triton/flash-attn)
-# vllm 0.23.0+rocm722 requires Python 3.12; rocm/dev-ubuntu-24.04 ships 3.12 by default.
-# The wheel comes from AMD's wheel server; --extra-index-url lets uv find the +rocm722 variant.
-# The uv download cache is a BuildKit cache mount (not in the layer), so a rebuild
-# reuses the large vLLM/torch wheels instead of re-downloading them.
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system \
-        "vllm==${VLLM_VERSION}+${VLLM_ROCM_VARIANT}" \
-        --extra-index-url "https://wheels.vllm.ai/rocm/${VLLM_VERSION}/${VLLM_ROCM_VARIANT}"
+# ----- 3. vLLM (built from source at pinned tag) ---------------------------------
+# Install torch 2.13.0+rocm7.2 from the upstream pytorch.org wheel index.
+#
+# UNBLOCK (2026-08-03): torch 2.12.0+rocm7.14.0 from repo.amd.com ships
+# Triton 3.7.1 which triggers hipErrorInvalidImage on SPUR gfx950 nodes
+# (amdgpu/KFD 6.14.14 host driver).  The pytorch.org rocm7.2 wheel ships
+# a Triton version compatible with vLLM 0.26.0 and the current SPUR KFD.
+# Revert to repo.amd.com once the SPUR nodes are upgraded to a KFD that
+# supports ROCm 7.14 compiled kernels.
+#
+# Version alignment (download.pytorch.org/whl/rocm7.2):
+#   torch 2.13.0+rocm7.2  ->  torchvision 0.21.0+rocm7.2
+# Wheels are pre-downloaded to /opt/pip-cache/wheels on the build host and
+# passed in via --build-context pip-wheels=<dir> to avoid the 6 GB download.
+# The context is mounted read-only and never baked into the image layer.
+# If the build-context is not provided, falls back to the index URL.
+RUN --mount=type=cache,target=/root/.cache/pip \
+    --mount=from=pip-wheels,source=.,target=/opt/pip-cache/wheels,ro \
+    if [ -f /opt/pip-cache/wheels/torch-2.13.0+rocm7.2-cp312-cp312-manylinux_2_28_x86_64.whl ]; then \
+        pip3 install \
+            --find-links /opt/pip-cache/wheels \
+            --prefer-binary \
+            --index-url https://download.pytorch.org/whl/rocm7.2 \
+            "torch==2.13.0+rocm7.2" \
+            "torchvision==0.28.0+rocm7.2"; \
+    else \
+        pip3 install \
+            --timeout 300 \
+            --retries 5 \
+            "torch==2.13.0+rocm7.2" \
+            "torchvision==0.28.0+rocm7.2" \
+            --index-url https://download.pytorch.org/whl/rocm7.2; \
+    fi
+
+# Validate ROCM_ARCH here — after the torch download so a per-arch build
+# doesn't bust the 6 GB wheel cache.  First use of ROCM_ARCH is in the vLLM
+# build step below.
+RUN test -n "$ROCM_ARCH" || { echo "ERROR: ROCM_ARCH is not set"; exit 1; }
+
+RUN git clone --depth 1 --branch "${VLLM_REF}" "${VLLM_GIT_URL}" /app/vllm
+
+# Copy only vLLM patches here — adding a LMCache or NIXL patch won't bust
+# the vLLM build cache.  Each patch directory is copied immediately before
+# its own build step for the same reason.
+COPY patches/vllm/ /app/patches/vllm/
+
+# Patch setup.py so _is_hip() short-circuits on VLLM_TARGET_DEVICE=rocm at
+# build time, without probing torch.version.hip before it is installed.
+RUN sed -i 's/def _is_hip() -> bool:/def _is_hip() -> bool:\n    if VLLM_TARGET_DEVICE == "rocm":\n        return True/' /app/vllm/setup.py
+
+# Apply every patch under patches/vllm/ in lexical order.
+RUN cd /app/vllm && \
+    shopt -s nullglob && \
+    patches=(/app/patches/vllm/*.patch) && \
+    if [ "${#patches[@]}" -gt 0 ]; then \
+        for patch in "${patches[@]}"; do \
+            if git apply "$patch"; then \
+                echo "Applied: $patch"; \
+            else \
+                echo "ERROR: vLLM patch does not apply cleanly: $patch" >&2; \
+                echo "The vLLM pin (${VLLM_REF}) likely drifted; rebase this patch against it." >&2; \
+                exit 1; \
+            fi; \
+        done; \
+    fi
+
+RUN --mount=type=cache,target=/root/.cache/pip \
+    --mount=type=cache,target=/root/.cache/ccache \
+    mkdir -p /wheels && \
+    cd /app/vllm && \
+    printf 'torch==2.13.0+rocm7.2\ntorchvision==0.28.0+rocm7.2\n' > /tmp/torch-constraints.txt && \
+    pip3 install -r requirements/rocm.txt \
+        --constraint /tmp/torch-constraints.txt && \
+    VLLM_TARGET_DEVICE=rocm \
+        PYTORCH_ROCM_ARCH="${ROCM_ARCH}" \
+        TORCH_DONT_CHECK_COMPILER_ABI=1 \
+        MAX_JOBS="$(nproc)" \
+        CCACHE_DIR=/root/.cache/ccache \
+        VLLM_VERSION_OVERRIDE="${VLLM_REF#v}+rocm" \
+        pip3 wheel --no-build-isolation --no-deps --no-cache-dir -w /wheels . && \
+    pip3 install --no-cache-dir /wheels/vllm-*.whl
 
 # ----- 4. LMCache (upstream release + AMD patches) ---------------------------
 # Shallow-clone the pinned release tag directly (no history/other branches).
 RUN git clone --depth 1 --branch "${LMCACHE_REF}" "${LMCACHE_GIT_URL}" /app/LMCache
 
-COPY patches/ /app/patches/
+# Copy LMCache patches just before use — isolated from vLLM and NIXL patches
+# so adding/changing a LMCache patch only invalidates the LMCache build steps.
+COPY patches/lmcache/ /app/patches/lmcache/
 
 # Apply every patch under patches/lmcache/ in lexical (filename) order -- the
 # NN- prefixes fix the sequence.  Drop a new NN-*.patch in to include it.
@@ -259,46 +328,13 @@ RUN uv pip uninstall --system \
         nixl nixl-cu12 nixl-cu13 \
         cupy-cuda12x cufile-python cuda-pathfinder 2>/dev/null || true
 
-# ----- 5. ROCm/rocm-systems hipFile (DEB + Python binding) ------------------
-RUN --mount=type=cache,target=/root/.cache/uv \
-    git init --quiet /app/rocm-systems && \
-    cd /app/rocm-systems && \
-    git remote add origin https://github.com/ROCm/rocm-systems.git && \
-    git config remote.origin.promisor true && \
-    git config remote.origin.partialclonefilter blob:none && \
-    git sparse-checkout init --cone && \
-    git sparse-checkout set projects/hipfile && \
-    git fetch --quiet --depth=1 --filter=blob:none --no-tags \
-        origin "${HIPFILE_SHA}" && \
-    git checkout --quiet --detach FETCH_HEAD && \
-    cd projects/hipfile && \
-    mkdir -p build && cd build && \
-    cmake -DCMAKE_HIP_PLATFORM=amd -DAIS_INSTALL_TOOLS=ON \
-          -DBUILD_TESTING=OFF \
-          -DAIS_INSTALL_EXAMPLES=OFF \
-          -DGPU_TARGETS="${ROCM_ARCH}" \
-          -DCMAKE_HIP_ARCHITECTURES="${ROCM_ARCH}" .. && \
-    cmake --build . -j"${BUILD_JOBS:-$(nproc)}" && \
-    cpack -G DEB && \
-    dpkg -i hipfile*deb && \
-    cd ../python && \
-    uv pip install --system -e . \
-        -Ccmake.define.HIPFILE_INCLUDE_DIR=../include \
-        -Ccmake.define.HIP_INCLUDE_DIR=/opt/rocm/include && \
-    test -x /app/rocm-systems/projects/hipfile/build/tools/ais-stats/ais-stats && \
-    ln -sf /app/rocm-systems/projects/hipfile/build/tools/ais-stats/ais-stats \
-        /app/ais-stats && \
-    ln -sf /app/ais-stats /usr/local/bin/ais-stats && \
-    # ais-check is a source-tree Python script (checks HIP-runtime + amdgpu AIS
-    # support at run time); no build/DEB install rule, so symlink it onto PATH.
-    test -f /app/rocm-systems/projects/hipfile/tools/ais-check/ais-check && \
-    install -m0755 /app/rocm-systems/projects/hipfile/tools/ais-check/ais-check \
-        /usr/local/bin/ais-check
+# ----- 5. hipFile — provided by the ROCm 7.14 base image (GA since 7.14) ------
+# No source build needed.  hipFile headers, libraries, Python bindings, ais-stats,
+# and ais-check are all pre-installed in rocm/dev-ubuntu-24.04:${ROCM_VERSION}-full.
 
 # ----- 6. NIXL (ai-dynamo/nixl upstream + nixl-rocm-ais-mt.patch) ------------
 # Clone upstream ai-dynamo/nixl, then apply nixl-rocm-ais-mt.patch to add ROCm/HIP
 # detection and the AIS_MT plugin tree.
-ARG AIC_UCX_FAST=
 COPY docker/scripts /tmp/nixl-scripts
 COPY patches/nixl/ /tmp/nixl-patches/
 # Apply every patch under patches/nixl/ (lexical order) to the fresh checkout.
@@ -354,18 +390,43 @@ RUN git clone --depth 1 --branch "${HSA_SNOOP_REF}" "${HSA_SNOOP_GIT_URL}" /app/
     echo "PASS: hsa-snoop v${HSA_SNOOP_REF} with Prometheus exporter (incl. AIS metrics) installed"
 
 # ----- 7. Runtime environment ------------------------------------------------
+# Vars from upstream vLLM Dockerfile.rocm added here:
+#   HSA_ENABLE_IPC_MODE_LEGACY=1  — legacy HIP IPC for cross-container KV registration (LMCache MP)
+#   SAFETENSORS_FAST_GPU=1        — GPU-accelerated weight loading, faster model startup
+#   HIP_FORCE_DEV_KERNARG=1       — kernel arg handling fix on MI300+/gfx942/gfx950
 ENV PYTHONUNBUFFERED=1 \
     PYTHONHASHSEED=0 \
     NIXL_PLUGIN_DIR=/opt/nixl/lib/x86_64-linux-gnu/plugins \
-    PYTHONPATH=/opt/nixl/lib/python3/dist-packages \
-    LD_LIBRARY_PATH=/opt/nixl/lib/x86_64-linux-gnu:/opt/nixl/lib:/opt/rocnixl-ucx/lib:/opt/rocm/lib
+    PYTHONPATH=/opt/rocm/share/amd_smi:/opt/nixl/lib/python3/dist-packages \
+    LD_LIBRARY_PATH=/opt/nixl/lib/x86_64-linux-gnu:/opt/nixl/lib:/opt/rocnixl-ucx/lib:/opt/rocm/lib \
+    HSA_ENABLE_IPC_MODE_LEGACY=1 \
+    SAFETENSORS_FAST_GPU=1 \
+    HIP_FORCE_DEV_KERNARG=1
+
+# Provide image metadata. AIC_VERSION is declared and used here — after all
+# expensive build steps — so version bumps only invalidate this single cheap
+# layer rather than busting the torch/vLLM/LMCache/NIXL compilation cache.
+ARG AIC_VERSION
+RUN test -n "$AIC_VERSION" || { echo "ERROR: AIC_VERSION is not set (read it from VERSION)"; exit 1; }
+LABEL org.opencontainers.image.title="rocm-aic" \
+      org.opencontainers.image.description="AMD Infinity Context: ROCm vLLM + LMCache tiered-cache inference stack" \
+      org.opencontainers.image.version="${AIC_VERSION}" \
+      org.opencontainers.image.base.name="${ROCM_BASE_IMAGE}" \
+      ai.amd.aic.version="${AIC_VERSION}" \
+      ai.amd.aic.rocm="${ROCM_VERSION}" \
+      ai.amd.aic.vllm="${VLLM_REF}" \
+      ai.amd.aic.lmcache="${LMCACHE_REF}" \
+      ai.amd.aic.nixl="${NIXL_REF}" \
+      ai.amd.aic.hipfile="rocm-${ROCM_VERSION}" \
+      ai.amd.aic.hsa-snoop="${HSA_SNOOP_REF}"
 
 # vLLM OpenAI-compatible server is the default entrypoint.
 ENTRYPOINT ["python3", "-m", "vllm.entrypoints.openai.api_server"]
 
 # ----- 8. Wheel export stage -------------------------------------------------
-# A scratch image whose only content is the pip wheels built above (patched
-# LMCache + ROCm NIXL).  Extract them WITHOUT building/loading the full image:
+# A scratch image whose only content is the pip wheels built above (source-built
+# vLLM + patched LMCache + ROCm NIXL).  Extract them WITHOUT building/loading
+# the full image:
 #   docker build --build-arg AIC_VERSION="$(<VERSION)" \
 #     --target wheels --output type=local,dest=./wheels .
 # The nightly-wheels GitHub workflow uses exactly this to publish the wheels.

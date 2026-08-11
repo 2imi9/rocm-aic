@@ -13,7 +13,9 @@ NIXL_SHA     := v1.3.2
 IMAGE_NAME ?= rocm-aic
 override AIC_VERSION := $(strip $(file <$(REPO_ROOT)/VERSION))
 
-_FRAMEWORK_VERSION_ARGS := AIC_VERSION ROCM_VERSION VLLM_VERSION VLLM_ROCM_VARIANT LMCACHE_REF NIXL_REF HIPFILE_SHA HSA_SNOOP_REF
+# vLLM is source-built from VLLM_REF, so there is no VLLM_VERSION/VLLM_ROCM_VARIANT
+# wheel pin, and hipFile now ships in the ROCm base image (pinned by ROCM_VERSION).
+_FRAMEWORK_VERSION_ARGS := AIC_VERSION ROCM_VERSION VLLM_REF LMCACHE_REF NIXL_REF HSA_SNOOP_REF
 _single_quote := '
 _shell_quote = '$(subst $(_single_quote),'"'"',$(1))'
 _FRAMEWORK_VERSION_ENV := $(foreach _arg,$(_FRAMEWORK_VERSION_ARGS),$(if $(filter undefined,$(origin $(_arg))),,$(_arg)=$(call _shell_quote,$(value $(_arg)))))
@@ -95,7 +97,7 @@ COMPOSE_PLUGIN_VERSION ?= v2.40.0
 # vLLM --kv-transfer-config for the MP connector (interactive `make up`).  The JSON
 # is wrapped in single quotes so compose's shlex splitting preserves the inner
 # double quotes; leave KV_TRANSFER_ARG empty for a plain (baseline) vLLM.
-_MP_CONNECTOR_JSON := {"kv_connector":"LMCacheMPConnector","kv_role":"kv_both","kv_connector_extra_config":{"lmcache.mp.host":"tcp://localhost","lmcache.mp.port":$(LMCACHE_PORT)}}
+_MP_CONNECTOR_JSON := {"kv_connector":"LMCacheMPConnector","kv_role":"kv_both","kv_connector_extra_config":{"lmcache.mp.host":"tcp://aic-lmcache","lmcache.mp.port":$(LMCACHE_PORT)}}
 KV_TRANSFER_ARG    ?= --kv-transfer-config '$(_MP_CONNECTOR_JSON)'
 export KV_TRANSFER_ARG
 
@@ -161,6 +163,47 @@ export AIC_CACHE_DIR        ?= $(AIC_SHARED_NFS)/rocm-aic/images/buildcache
 override export NVME_DATA     := /mnt/m2m_nobackup/aic-cliff/nvme
 override export GDS_SLAB_DATA := /mnt/m2m_nobackup/aic-cliff/slab
 override export HF_HOME       := $(AIC_SHARED_NFS)/huggingface
+# SPUR nodes use XFS LVM (not bare NVMe); hipFile P2PDMA (AIS_MT backend) fails at
+# register_memory because GPUDirect storage is not available on this filesystem.
+# Default the nvme arm to the NIXL first-class POSIX plugin (cpu staging buffer),
+# which avoids hipFileBufRegister entirely.  A user override still takes precedence.
+# SPUR nodes are MI355X (gfx950); pin the arch for the compose build args.  The image
+# ref itself is left to the version-derived tag (docker/scripts/aic-image-tag.sh) so a
+# caller-supplied AIC_IMAGE_NAME -- notably CI's per-SHA rocm-aic-ci-<short> -- is
+# honoured.  Arch selection is carried by the tarball's _arch_tag suffix, not the image
+# tag, so cliff still resolves the gfx950 tarball via its glob.
+override export ROCM_ARCH     := gfx950
+export AIC_L2_BACKEND         ?= nixl_posix
+# Right-size the POSIX slot file: must be >= KV chunk size for the target model.
+#   gpt-oss-120b fp8: 256 tok × 8 KV heads × 64 dim × 2 × 36 layers × 1B = 9 MiB
+#   Qwen2.5-3B fp8:  256 tok × 8 KV heads × 128 dim × 2 × 36 layers × 1B = 18 MiB
+#   Default 32 MiB covers both; override for other models.
+#   (vs the 256 MiB AIS_MT default, which pre-allocates a full staging buffer —
+#    28× too large for POSIX where only actual KV bytes are written per slot).
+# Also enlarge the pool: 18K-tok prefix = 71 chunks/client; at c=250 need ~18K slots;
+#   32K at 32 MiB = 1 TiB on disk (lazy, fine for the 30 TB XFS LVM).
+# Parallel POSIX workers: lmcache server default is 1 GPU worker — bump to 4 so
+#   concurrent client writes overlap instead of serializing on the ZMQ channel.
+# Slot size: must be >= the KV chunk size for the target model.
+#   gpt-oss-120b fp8: 256 tok × 8 heads × 64 dim × 2 × 36 layers × 1B = 9 MiB → 16 MiB OK
+#   Qwen2.5-3B fp8:  256 tok × 8 heads × 128 dim × 2 × 36 layers × 1B = 18 MiB → 32 MiB needed
+# Default 32 MiB covers both; override per model if needed.
+export LMCACHE_NIXL_POSIX_SLOT_SIZE ?= 33554432
+export LMCACHE_NIXL_POSIX_POOL      ?= 32768
+# SPUR authz plugin blocks --pid=host, so node-exporter, hsa-snoop, and nvme-exporter
+# (which all need --pid=host) cannot start.  Use "safe" mode: amdgpu-exporter and
+# rdma-exporter do NOT need --pid=host and work fine on SPUR.
+# Set AIC_EXPORTERS=1 for the full fleet on nodes that allow --pid=host.
+# Set AIC_EXPORTERS=0 for Prometheus-only (no exporters at all).
+override export AIC_EXPORTERS            := safe
+# hsa-snoop: use container PID namespace instead of host to avoid spur-authz block.
+# vLLM joins lmcache's PID ns (pid:service:lmcache), so aic-lmcache sees both processes.
+override export AIC_HSA_SNOOP_PID_MODE  := container:aic-lmcache
+# Reduce POSIX GPU workers: at high concurrency (c=32) the NIXL POSIX read path hits
+# NIXL_ERR_INVALID_PARAM in makeXferReq when too many concurrent handles are in flight.
+# 1 worker serialises STORE/RETRIEVE so the NIXL descriptor pool is never exhausted.
+# The write cost at c=1/8 is still acceptable; L2 reads work reliably at 1 worker.
+export LMCACHE_MAX_GPU_WORKERS      ?= 1
 else
 export AIC_CACHE_DIR        ?= /scratch/$(USER)/images/buildcache
 endif
@@ -197,12 +240,13 @@ _GIT_DIRTY     := $(if $(shell git -C "$(CURDIR)" status --porcelain -- . 2>/dev
 _GEN_DATE      := $(shell date +%Y%m%d)
 EXPORT_TARBALL ?= $(CURDIR)/$(EXPORT_PREFIX)-$(_GEN_DATE)-$(_GIT_SHORT_REV)$(_GIT_DIRTY).tar.gz
 
-.PHONY: help ensure-compose build up up-batch up-gds-l1 up-gds-l1-batch down logs logs-lmcache logs-vllm \
-        ps shell-lmcache shell-vllm restart-vllm restart-lmcache cliff plot venv \
+.PHONY: help ensure-compose build up up-batch up-dev up-monitoring down-monitoring up-gds-l1 up-gds-l1-batch down logs logs-lmcache logs-vllm \
+        ps shell-lmcache shell-vllm restart-vllm restart-lmcache cliff plot venv vllm-reset-test \
         monitoring-up monitoring-down monitoring-logs monitoring-build-exporters \
-        dist-build dist-build-fast dist-build-exporters dist-push smoke-test smoke-test-fast \
-        tiny-test tiny-test-fast install-ci-scripts cliff-submit cliff-short \
-        cliff-long-64k cliff-long-128k \
+        dist-build dist-build-fast dist-build-exporters dist-build-monitoring dist-push \
+        smoke-test smoke-test-fast tiny-test tiny-test-fast install-ci-scripts \
+        cliff-submit cliff-short \
+        cliff-kvd cliff-spur-l2 cliff-spur-l2-debug cliff-long-64k cliff-long-128k \
         export _check_hf_token _prep_dirs _check_gds_slab
 
 .DEFAULT_GOAL := help
@@ -215,6 +259,9 @@ help:
 	@echo "  make build             Build the shared image ($(IMAGE_REF))"
 	@echo "  make up                Start lmcache + vllm (foreground, DRAM L1 + AIS_MT/NFS L2)"
 	@echo "  make up-batch          Start lmcache + vllm (background)"
+	@echo "  make up-dev            Start in dev mode: --enforce-eager skips CUDA graph capture (~60s faster, ~10% slower inference)"
+	@echo "  make up-monitoring     Start lmcache + vllm + prometheus + exporters (background)"
+	@echo "  make down-monitoring   Stop full stack including monitoring profile"
 	@echo "  make up-gds-l1         Start with hipFile GDS NVMe slab as L1 (foreground)"
 	@echo "  make up-gds-l1-batch   Start with hipFile GDS NVMe slab as L1 (background)"
 	@echo "  make down              Stop and remove both containers"
@@ -229,6 +276,8 @@ help:
 	@echo ""
 	@echo "Benchmark targets:"
 	@echo "  make venv              Create/update repo-root .venv with bench+plot deps"
+	@echo "  make vllm-reset-test   Verify LMCache L1+L2 retrieval: small L1 (1GiB), NIXL POSIX L2,"
+	@echo "                         flood to overflow, POST /reset_prefix_cache, confirm L1+L2 hits"
 	@echo "  make cliff             Run KV-cache cliff benchmark, write CSV to $(BENCH_LOGDIR)/results/"
 	@echo "  make plot              Generate cliff PNG charts from $(BENCH_LOGDIR)/results/ CSVs"
 	@echo ""
@@ -237,6 +286,7 @@ help:
 	@echo "  make dist-build        Build image (+ fabric exporters) on a Slurm build node, save tarballs"
 	@echo "  make dist-build-fast   Single-arch dev build (AIC_FAST_ARCH=$(AIC_FAST_ARCH), no exporters) -- faster iteration"
 	@echo "  make dist-build-exporters  Build ONLY the nvme/rdma exporter images (no main rebuild)"
+	@echo "  make dist-build-monitoring Pull + save Prometheus/amdgpu-exporter to AIC_IMAGE_DIR"
 	@echo "  make dist-push         Tag + push the built image (needs AIC_PUSH_REF)"
 	@echo "  make smoke-test        Load + smoke-test the image on a GPU+NVMe node"
 	@echo "                         (also sanity-checks exporters + writes a Prometheus TSDB"
@@ -246,6 +296,9 @@ help:
 	@echo "  make tiny-test-fast    Fast variant of tiny-test"
 	@echo "  make install-ci-scripts  Deploy .github/scripts/spur-*.sh to $(AIC_CI_LIB_DIR) (sudo if needed)"
 	@echo "  make cliff-submit      sbatch the full 3-arm cliff sweep -> logs/<job-id>/"
+	@echo "  make cliff-kvd         sbatch focused KVD cliff: shared prefix, sparse c ladder (1,8,32,64,128,250)"
+	@echo "  make cliff-spur-l2     sbatch SPUR-tuned L2 cliff: per_client prefix, util=0.40, 8GB DRAM L1, c=1/8/32 (vram+nvme)"
+	@echo "  make cliff-spur-l2-debug  Like cliff-spur-l2 but c=1 only, tiny L1=0.1GB, DEBUG logging (diagnose ext_hit=0)"
 	@echo "  make cliff-short       sbatch a 1-point cliff (concur=1, 1 iter) to smoke-test the flow"
 	@echo "  make cliff-long-64k    sbatch a 64k-ISL YaRN(x2) 3-arm sweep (pools sized for the working set)"
 	@echo "  make cliff-long-128k   sbatch a 128k-ISL YaRN(x4) 3-arm sweep (extreme; big DRAM/slab pools)"
@@ -335,7 +388,7 @@ ensure-compose:
 		echo "installed: $$(docker compose version --short 2>/dev/null)"; \
 	fi
 
-build: ensure-compose
+build: ensure-compose monitoring-build-exporters
 	@test -n "$(ROCM_ARCH)" || { \
 		echo "ERROR: ROCM_ARCH empty (install ROCm or set ROCM_ARCH=gfxNNNN)" >&2; exit 1; }
 	cd "$(REPO_ROOT)" && $(COMPOSE_CACHE) build \
@@ -344,11 +397,28 @@ build: ensure-compose
 	@echo "Built $(IMAGE_REF) (also tagged $(IMAGE_NAME):latest)"
 
 up: ensure-compose _check_hf_token _prep_dirs
-	$(COMPOSE_CACHE) up
+	@mkdir -p "$(AIC_METRICS_DIR)"
+	PROM_UID="$$(id -u)" PROM_GID="$$(id -g)" \
+	    $(COMPOSE_CACHE) --profile monitoring up
 
 up-batch: ensure-compose _check_hf_token _prep_dirs
-	$(COMPOSE_CACHE) up -d
+	@mkdir -p "$(AIC_METRICS_DIR)"
+	PROM_UID="$$(id -u)" PROM_GID="$$(id -g)" \
+	    $(COMPOSE_CACHE) --profile monitoring up -d
 	@echo "Started. Use 'make logs' to follow or 'make down' to stop."
+
+up-dev: ensure-compose _check_hf_token _prep_dirs  # Fast startup: --enforce-eager skips CUDA graph capture (~60s faster)
+	@mkdir -p "$(AIC_METRICS_DIR)"
+	PROM_UID="$$(id -u)" PROM_GID="$$(id -g)" \
+	    VLLM_EXTRA_ARGS="--enforce-eager $${VLLM_EXTRA_ARGS}" \
+	    $(COMPOSE_CACHE) --profile monitoring up -d
+	@echo "Started in dev mode (enforce-eager, no CUDA graphs). Use 'make logs' to follow."
+
+# up-monitoring kept as an alias for up-batch for backward compatibility.
+up-monitoring: up-batch
+
+down-monitoring:                                           # Stop full stack including monitoring profile
+	$(COMPOSE_CACHE) --profile monitoring down
 
 up-gds-l1: ensure-compose _check_hf_token _check_gds_slab _prep_dirs
 	GDS_MODE=1 $(COMPOSE_CACHE) up
@@ -358,7 +428,7 @@ up-gds-l1-batch: ensure-compose _check_hf_token _check_gds_slab _prep_dirs
 	@echo "Started (GDS L1 mode). Use 'make logs' to follow or 'make down' to stop."
 
 down:
-	$(COMPOSE_CACHE) down
+	$(COMPOSE_CACHE) --profile monitoring down
 
 logs:
 	$(COMPOSE_CACHE) logs -f
@@ -392,6 +462,25 @@ venv:
 	"$(REPO_ROOT)/.venv/bin/pip" install -e "$(CURDIR)[dev]"
 	@echo "venv ready at $(REPO_ROOT)/.venv"
 	@echo "Activate: source $(REPO_ROOT)/.venv/bin/activate"
+
+vllm-reset-test: _check_hf_token _prep_dirs
+	@echo "Starting LMCache L1+L2 retrieval test with small L1 (1 GiB) + NIXL POSIX L2..."
+	@mkdir -p "$(AIC_METRICS_DIR)"
+	PROM_UID="$$(id -u)" PROM_GID="$$(id -g)" \
+	    LMCACHE_L1_SIZE_GB=1 \
+	    VLLM_EXTRA_ARGS="--enforce-eager $${VLLM_EXTRA_ARGS}" \
+	    AIC_L2_BACKEND=nixl_posix \
+	    $(COMPOSE_CACHE) --profile monitoring up -d
+	@echo "Waiting for vLLM to be healthy..."
+	@for i in $$(seq 1 60); do \
+	    r=$$(docker exec aic-client curl -s -o /dev/null -w '%{http_code}' \
+	        http://aic-vllm-gpu0:8000/health 2>/dev/null); \
+	    [ "$$r" = "200" ] && echo "vLLM healthy after $${i}s" && break; \
+	    [ "$$i" = "60" ] && echo "ERROR: vLLM not healthy after 300s" >&2 && exit 1; \
+	    sleep 5; \
+	done
+	$(PYTHON) "$(CURDIR)/benchmarks/vllm_reset_test.py"
+	@echo "Test complete. Run 'make down' to stop the stack."
 
 cliff: _prep_dirs
 	@test -n "$(BENCH_MODEL)" || { \
@@ -465,6 +554,27 @@ dist-build-exporters:          # Build ONLY the fabric exporters (no main-image 
 	@# Hub egress.  Pin an egress-capable node with AIC_BUILD_NODE=<node>, or build
 	@# on the current host with AIC_BUILD_LOCAL=1.
 	"$(DIST)" build-exporters
+
+dist-build-monitoring:         # Pull + save monitoring sidecar images to AIC_IMAGE_DIR
+	@# Saves prom/prometheus and rocm/device-metrics-exporter to the shared NFS image
+	@# dir so cliff nodes can load them without Docker Hub egress.  Run once; the
+	@# load_image_if_needed call in run-cliff.sbatch picks them up automatically.
+	@set -e; \
+	for img in \
+	    "prom/prometheus:v2.55.1" \
+	    "rocm/device-metrics-exporter:v1.5.1" \
+	; do \
+	    tag="$$(printf '%s' "$$img" | tr '/:' '--').tar.zst"; \
+	    dest="$(AIC_IMAGE_DIR)/$$tag"; \
+	    if [ ! -f "$$dest" ]; then \
+	        echo "Pulling $$img and saving to $$dest ..."; \
+	        docker pull "$$img"; \
+	        docker save "$$img" | zstd -T0 -q > "$$dest"; \
+	        echo "  saved $$(du -h "$$dest" | cut -f1) -> $$dest"; \
+	    else \
+	        echo "  $$dest already present (use AIC_FORCE_LOAD=1 to refresh)"; \
+	    fi; \
+	done
 
 dist-push:                     # Tag + push the built image to a registry (needs AIC_PUSH_REF)
 	"$(DIST)" push
@@ -543,9 +653,9 @@ endif
 endif
 ifeq ($(AIC_SPUR_CLUSTER),1)
 _CLIFF_SPUR_CTL  := SPUR_CONTROLLER_ADDR=$(AIC_SPUR_CONTROLLER)
-_CLIFF_SBATCH_ARGS := --partition=amd-spur --constraint= \
+_CLIFF_SBATCH_ARGS := --partition=amd-spur --constraint= --gres= \
     $(if $(AIC_CLIFF_NODE),--nodelist=$(AIC_CLIFF_NODE),)
-# SPUR sbatch does not support --parsable; parse job id from "Submitted batch job N"
+# SPUR sbatch does not support --parsable or --no-requeue; parse job id from "Submitted batch job N"
 _CLIFF_SUBMIT     = $(_CLIFF_SPUR_CTL) $(_CLIFF_STRIP) sbatch \
     $(_CLIFF_SBATCH_ARGS) $(1) .slurm/run-cliff.sbatch 2>&1 | \
     tee /dev/stderr | grep -oE '[0-9]+$$' | tail -1
@@ -563,6 +673,82 @@ cliff-submit:
 	    $(if $(AIC_CLIFF_TIME),--time=$(AIC_CLIFF_TIME),))) && \
 	    echo "submitted cliff job $$jobid" && \
 	    echo "log: $(CURDIR)/logs/$$jobid/cliff.out"
+
+# Focused KVD cliff: shared prefix mode + sparse concurrency ladder.
+# Rationale: per_client mode never exercises L2 read-back (VRAM L1 holds
+# all per-client prefixes without evicting to L2).  shared mode makes every
+# second+ client hit the same cached prefix, so the vram/kvd performance
+# difference is visible.  The concurrency ladder skips the dense plateau
+# (c=48–160 all plateau at ~145K tok/s) and captures the ramp + cliff edge:
+#   1 (cold), 8, 32 (near-peak), 64, 128 (peak), 250 (beyond peak).
+# With 2 iters and shared prefix the sweep runs in ~30–45 min per arm.
+cliff-kvd:
+	@cd "$(CURDIR)" && jobid=$$( \
+	    BENCH_PREFIX_MODE=shared \
+	    BENCH_CONCUR="$${BENCH_CONCUR:-1,8,32,64,128,250}" \
+	    BENCH_ITERS="$${BENCH_ITERS:-2}" \
+	    $(call _CLIFF_SUBMIT,--job-name=aic-cliff-kvd \
+	    --time=$(if $(AIC_CLIFF_TIME),$(AIC_CLIFF_TIME),02:00:00))) && \
+	    echo "submitted cliff-kvd job $$jobid (shared prefix, c=1,8,32,64,128,250, 2 iters)" && \
+	    echo "log: $(CURDIR)/logs/$$jobid/cliff.out"
+
+# SPUR-tuned L2 cliff: exercises real KV eviction through the DRAM L1 into the POSIX NVMe L2.
+#
+# Why per_client prefix:
+#   With shared prefix, all c clients share ~630 MiB of KV chunks, which fits 13× in the
+#   8 GB DRAM L1 regardless of c — ext_hit stays 0% at every concurrency (confirmed job 11301).
+#   per_client gives each client a unique stable prefix; the combined working set is c × 630 MiB,
+#   which overflows the 8 GB DRAM L1 at c≥13 and forces real NVMe L2 reads (ext_hit > 0%).
+#
+# Tier sizing:
+#   VLM_GPU_MEMORY_UTILIZATION=0.40   VRAM KV cache ~17 GB; evicts at c≈7 per_client
+#   AIC_LOCAL_CPU=true / DRAM L1=8 GB absorbs VRAM evictions; spills to NVMe at c≥13
+#   POSIX NVMe L2 (nixl_posix, 16 MiB slots, pool=32768) on /mnt/m2m_nobackup XFS LVM
+#
+# Single concurrency point: c=32.
+#   c=32 overflows the 8 GB DRAM L1 (32 × 630 MiB ≈ 20 GB) → ext_hit > 0% expected.
+#   vram arm skipped — we have clean vram_only data from previous runs.
+#   post-warmup-sleep scaled to 300s so the POSIX write queue drains before
+#   timed iters begin (workers=1 serialises writes; c=32 warmup takes ~450s).
+#   BENCH_ITERS=2 for speed; iters are identical once cache is primed.
+# Arms: nvme only — vram arm skipped (data already collected), gds skipped (SPUR XFS).
+cliff-spur-l2:
+	@cd "$(CURDIR)" && jobid=$$( \
+	    BENCH_PREFIX_MODE=per_client \
+	    BENCH_CONCUR="$${BENCH_CONCUR:-32}" \
+	    BENCH_ITERS="$${BENCH_ITERS:-2}" \
+	    VLLM_MODEL="$${VLLM_MODEL:-Qwen/Qwen2.5-3B-Instruct}" \
+	    VLM_GPU_MEMORY_UTILIZATION="$(if $(filter command line environment override,$(origin VLM_GPU_MEMORY_UTILIZATION)),$(VLM_GPU_MEMORY_UTILIZATION),0.40)" \
+	    AIC_LOCAL_CPU=true \
+	    LMCACHE_MAX_LOCAL_CPU_SIZE="$(if $(filter command line environment override,$(origin LMCACHE_MAX_LOCAL_CPU_SIZE)),$(LMCACHE_MAX_LOCAL_CPU_SIZE),8)" \
+	    AIC_CLIFF_ARMS="$${AIC_CLIFF_ARMS:-nvme}" \
+	    $(call _CLIFF_SUBMIT,--job-name=aic-cliff-spur-l2 \
+	    --time=$(if $(AIC_CLIFF_TIME),$(AIC_CLIFF_TIME),03:00:00))) && \
+	    echo "submitted cliff-spur-l2 job $$jobid" && \
+	    echo "  util=0.40, DRAM L1=8GB, POSIX NVMe L2, per_client, Qwen2.5-3B, c=32, 2 iters, nvme only" && \
+	    echo "log: $(CURDIR)/logs/$$jobid/cliff.out"
+
+cliff-spur-l2-debug:         # Tiny L1 (0.1GB) + DEBUG vLLM logging to diagnose ext_hit=0
+	@# c=1, 1 timed iter, 0.1GB DRAM L1 so a single client's ~630MiB prefix
+	@# immediately overflows into L2.  VLLM_LOGGING_LEVEL=DEBUG enables the
+	@# "vLLM hit is: N" log line in lmcache_mp_connector.py; search
+	@# container-aic-vllm.log for "vLLM hit is" to confirm ext_hit fires.
+	@cd "$(CURDIR)" && jobid=$$( \
+	    BENCH_PREFIX_MODE=per_client \
+	    BENCH_CONCUR="$${BENCH_CONCUR:-1}" \
+	    BENCH_ITERS="$${BENCH_ITERS:-1}" \
+	    VLLM_MODEL="$${VLLM_MODEL:-Qwen/Qwen2.5-3B-Instruct}" \
+	    VLM_GPU_MEMORY_UTILIZATION="$(if $(filter command line environment override,$(origin VLM_GPU_MEMORY_UTILIZATION)),$(VLM_GPU_MEMORY_UTILIZATION),0.40)" \
+	    AIC_LOCAL_CPU=true \
+	    LMCACHE_MAX_LOCAL_CPU_SIZE="$(if $(filter command line environment override,$(origin LMCACHE_MAX_LOCAL_CPU_SIZE)),$(LMCACHE_MAX_LOCAL_CPU_SIZE),0.1)" \
+	    AIC_CLIFF_ARMS="$${AIC_CLIFF_ARMS:-nvme}" \
+	    VLLM_LOGGING_LEVEL=DEBUG \
+	    $(call _CLIFF_SUBMIT,--job-name=aic-cliff-l2-debug \
+	    --time=$(if $(AIC_CLIFF_TIME),$(AIC_CLIFF_TIME),01:00:00))) && \
+	    echo "submitted cliff-spur-l2-debug job $$jobid" && \
+	    echo "  util=0.40, DRAM L1=0.1GB (forces L2 hits at c=1), per_client, c=1, 1 iter, DEBUG logging" && \
+	    echo "log: $(CURDIR)/logs/$$jobid/cliff.out" && \
+	    echo "  check container-aic-vllm.log for 'vLLM hit is' to confirm ext_hit"
 
 # Fast setup check: a single concurrency point, one timed iteration, all 3 arms.
 # Respects user overrides of BENCH_CONCUR / BENCH_ITERS.
@@ -595,8 +781,8 @@ cliff-short:
 cliff-long-64k:                # sbatch a 64k-ISL YaRN(x2 -> 65536) 3-arm sweep
 	@cd "$(CURDIR)" && jobid=$$( \
 	    VLLM_MODEL="$${VLLM_MODEL:-Qwen/Qwen2.5-3B-Instruct}" \
-	    VLM_GPU_MEMORY_UTILIZATION="$${VLM_GPU_MEMORY_UTILIZATION:-0.12}" \
-	    VLM_YARN_FACTOR="$${VLM_YARN_FACTOR:-2.0}" VLM_MAX_MODEL_LEN="$${VLM_MAX_MODEL_LEN:-65536}" \
+	    VLM_GPU_MEMORY_UTILIZATION="$(if $(filter command line environment override,$(origin VLM_GPU_MEMORY_UTILIZATION)),$(VLM_GPU_MEMORY_UTILIZATION),0.12)" \
+	    VLM_YARN_FACTOR="$${VLM_YARN_FACTOR:-2.0}" VLM_MAX_MODEL_LEN="$(if $(filter command line environment override,$(origin VLM_MAX_MODEL_LEN)),$(VLM_MAX_MODEL_LEN),65536)" \
 	    BENCH_ISL="$${BENCH_ISL:-64000}" BENCH_SHARED_TOK="$${BENCH_SHARED_TOK:-60000}" \
 	    BENCH_PREFIX_MODE="$${BENCH_PREFIX_MODE:-per_client}" BENCH_ITERS="$${BENCH_ITERS:-2}" \
 	    AIC_LOCAL_CPU="$${AIC_LOCAL_CPU:-true}" LMCACHE_MAX_LOCAL_CPU_SIZE="$${LMCACHE_MAX_LOCAL_CPU_SIZE:-64}" \
@@ -610,8 +796,8 @@ cliff-long-64k:                # sbatch a 64k-ISL YaRN(x2 -> 65536) 3-arm sweep
 cliff-long-128k:               # sbatch a 128k-ISL YaRN(x4 -> 131072) 3-arm sweep (extreme)
 	@cd "$(CURDIR)" && jobid=$$( \
 	    VLLM_MODEL="$${VLLM_MODEL:-Qwen/Qwen2.5-3B-Instruct}" \
-	    VLM_GPU_MEMORY_UTILIZATION="$${VLM_GPU_MEMORY_UTILIZATION:-0.12}" \
-	    VLM_YARN_FACTOR="$${VLM_YARN_FACTOR:-4.0}" VLM_MAX_MODEL_LEN="$${VLM_MAX_MODEL_LEN:-131072}" \
+	    VLM_GPU_MEMORY_UTILIZATION="$(if $(filter command line environment override,$(origin VLM_GPU_MEMORY_UTILIZATION)),$(VLM_GPU_MEMORY_UTILIZATION),0.12)" \
+	    VLM_YARN_FACTOR="$${VLM_YARN_FACTOR:-4.0}" VLM_MAX_MODEL_LEN="$(if $(filter command line environment override,$(origin VLM_MAX_MODEL_LEN)),$(VLM_MAX_MODEL_LEN),131072)" \
 	    BENCH_ISL="$${BENCH_ISL:-128000}" BENCH_SHARED_TOK="$${BENCH_SHARED_TOK:-126000}" \
 	    BENCH_PREFIX_MODE="$${BENCH_PREFIX_MODE:-per_client}" BENCH_ITERS="$${BENCH_ITERS:-1}" \
 	    AIC_LOCAL_CPU="$${AIC_LOCAL_CPU:-true}" LMCACHE_MAX_LOCAL_CPU_SIZE="$${LMCACHE_MAX_LOCAL_CPU_SIZE:-64}" \
