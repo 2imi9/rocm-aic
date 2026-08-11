@@ -12,6 +12,9 @@
 # DL3009: Delete apt lists -- handled where practical
 # DL3013: Pin pip versions -- from upstream reqs files
 # DL3015: --no-install-recommends -- not always desired
+# DL3042: Pip cache dir -- intentionally using BuildKit
+#         cache mounts for pip; --no-cache-dir would defeat
+#         the purpose
 # DL3059: Consolidate RUN -- readability over layers
 # DL4006: pipefail -- added where needed; not all
 #         Dockerfiles use pipes
@@ -23,6 +26,7 @@ ignored:
   - DL3009
   - DL3013
   - DL3015
+  - DL3042
   - DL3059
   - DL4006
   - SC2028
