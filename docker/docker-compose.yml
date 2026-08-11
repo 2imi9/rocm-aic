@@ -355,17 +355,30 @@ services:
         required: false
 
   # ---------------------------------------------------------------------------
-  # client: lightweight Alpine container on the aic network for ad-hoc testing.
-  # Use `docker exec -it aic-client sh` to get a shell with curl available,
-  # then hit vllm/lmcache by container name (e.g. http://aic-vllm-gpu0:8000).
-  # Always up alongside the inference stack; consumes negligible resources.
+  # client: Python + curl container on the aic network for ad-hoc testing and
+  # benchmarking.  The repo root is bind-mounted at /repo so run_cliff.py and
+  # other benchmarks are available without rebuilding the image.
+  # Use `docker exec -it aic-client bash` to get a shell, then hit
+  # vllm/lmcache by container name (e.g. http://aic-vllm-gpu0:8000).
+  # pip deps are pre-installed from an explicit list matching pyproject.toml [dev] at startup.
   # ---------------------------------------------------------------------------
   client:
-    image: curlimages/curl:latest
+    image: ${AIC_CLIENT_IMAGE:-python:3.12}
     container_name: aic-client
     networks: [aic]
-    dns: ["127.0.0.11"]
-    entrypoint: ["tail", "-f", "/dev/null"]
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        pip install --quiet \
+          openai httpx pyyaml tqdm \
+          transformers huggingface-hub \
+          prometheus-client aiohttp \
+          matplotlib pandas numpy && \
+        tail -f /dev/null
+    volumes:
+      - ..:/repo:ro
+      - ../logs:/logs
+    working_dir: /repo
     restart: unless-stopped
 
   # ---------------------------------------------------------------------------
@@ -471,6 +484,31 @@ services:
       - --metrics-path=/metrics
       - --health-path=/health
       - --enable-roce-pfc-metrics=false
+
+  # ---------------------------------------------------------------------------
+  # grafana: pre-provisioned AIC dashboard, anonymous access, port 3000.
+  # Open http://localhost:3000 after `make up` (with --profile monitoring).
+  # ---------------------------------------------------------------------------
+  grafana:
+    profiles: [monitoring]
+    image: ${AIC_GRAFANA_IMAGE:-grafana/grafana:11.5.2}
+    container_name: aic-grafana
+    networks: [aic]
+    ports:
+      - "${AIC_GRAFANA_PORT:-3000}:3000"
+    restart: unless-stopped
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+      GF_SECURITY_ALLOW_EMBEDDING: "true"
+    volumes:
+      - ../monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ../monitoring/grafana/dashboards:/etc/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+
+volumes:
+  grafana-data:
 
   # hsa-snoop is intentionally omitted here: it requires exclusive access to
   # /sys/kernel/tracing/trace_pipe and conflicts with any host hsa-snoop service.

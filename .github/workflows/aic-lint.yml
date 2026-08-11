@@ -38,3 +38,38 @@ jobs:
         run: npm install -g htmlhint
       - name: Run htmlhint
         run: htmlhint '.github/pages/*.html'
+
+  grafana-dashboard-lint:
+    name: Grafana dashboard lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dashboard-linter
+        run: |
+          set -euo pipefail
+          version="0.2.0"
+          url="https://github.com/grafana/dashboard-linter/releases/download/v${version}/dashboard-linter_${version}_linux_amd64.tar.gz"
+          curl -fsSL "$url" | tar -xz -C /usr/local/bin dashboard-linter
+          dashboard-linter lint --help > /dev/null
+      - name: Lint AIC Overview dashboard
+        run: |
+          set -euo pipefail
+          # Rules disabled in .linter-config.yaml:
+          #   template-job-rule / target-job-rule: fixed job names per scrape
+          #     target; a $job dropdown would break all panel queries.
+          #   template-instance-rule / target-instance-rule: same — AIC-specific.
+          #   target-counter-agg-rule: summary row shows cumulative totals via
+          #     max_over_time(), not rate() — intentional design.
+          # Run linter and fail only on findings not in our exclusion list.
+          # dashboard-linter v0.2.0 does not honour 'disabled: true' for all
+          # rules in --strict mode, so we filter the output manually.
+          out=$(dashboard-linter lint \
+            --config monitoring/grafana/.linter-config.yaml \
+            monitoring/grafana/dashboards/aic-overview.json 2>&1)
+          echo "$out"
+          # Fail if any ❌ lines remain after removing excluded rule output.
+          echo "$out" | grep '❌' \
+            | grep -v 'instance selector\|job selector' \
+            | grep -v 'missing the instance\|missing the job' \
+            | grep -v 'counter metric.*is not aggregated' \
+            && exit 1 || exit 0
