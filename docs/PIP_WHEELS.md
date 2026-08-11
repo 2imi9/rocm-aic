@@ -16,8 +16,8 @@ pip install \
 
 **Compatibility — read before installing.** These are **not** manylinux wheels:
 
-- ROCm **7.2.x**, Python **3.12**, **x86_64** only. They match the
-  `rocm/dev-ubuntu-24.04:7.2.4-complete` base; other ROCm/Python/arch
+- ROCm **7.14.x**, Python **3.12**, **x86_64** only. They match the
+  `rocm/dev-ubuntu-24.04:7.14.0-full` base; other ROCm/Python/arch
   combos will fail to import.
 - The wheels are built for the image's full multi-arch set (`gfx90a … gfx1201`);
   LMCache's HIP extension is compiled for all of them.

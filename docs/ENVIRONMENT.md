@@ -17,6 +17,7 @@
 | `LMCACHE_NVME_POOL` | `4096` | NIXL pool slots for NVMe adapter |
 | `LMCACHE_NVME_SLOT_SIZE` | `268435456` | NIXL file size per NVMe pool slot, bytes (256 MiB) |
 | `LMCACHE_NFS_POOL` | `1024` | NIXL pool slots for NFS adapter |
+| `VLM_BLOCK_SIZE` | `64` | vLLM `--block-size`; set this to match the model and connector cache geometry |
 | `VLM_ATTENTION_BACKEND` | `TRITON_ATTN` | vLLM `--attention-backend` (TRITON_ATTN supports KV connectors) |
 | `VLM_KV_CACHE_DTYPE` | `fp8` | vLLM `--kv-cache-dtype` (`auto` for non-fp8 arches) |
 | `VLLM_EXTRA_ARGS` | — | Extra vLLM args appended verbatim (e.g. `--hf-overrides '{...}'`; single-quote embedded JSON) |

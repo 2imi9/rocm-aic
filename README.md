@@ -2,9 +2,9 @@
 
 [![MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://github.com/ROCm/rocm-aic/blob/main/LICENSE.md)
 [![Platform](https://img.shields.io/badge/platform-linux-lightgrey.svg)](README.md)
-[![ROCm](https://img.shields.io/badge/ROCm-7.2.4-green.svg)](https://rocm.docs.amd.com)
-[![vLLM](https://img.shields.io/badge/vLLM-0.25.0+rocm723-blue.svg)](https://github.com/vllm-project/vllm)
-[![LMCache](https://img.shields.io/badge/LMCache-v0.5.2-blue.svg)](https://github.com/LMCache/LMCache)
+[![ROCm](https://img.shields.io/badge/ROCm-7.14.0-green.svg)](https://rocm.docs.amd.com)
+[![vLLM](https://img.shields.io/badge/vLLM-v0.26.0-blue.svg)](https://github.com/vllm-project/vllm)
+[![LMCache](https://img.shields.io/badge/LMCache-v0.5.3-blue.svg)](https://github.com/LMCache/LMCache)
 [![NIXL](https://img.shields.io/badge/NIXL-v1.3.2-blue.svg)](https://github.com/ai-dynamo/nixl)
 [![hsa-snoop](https://img.shields.io/badge/hsa--snoop-v1.0.0-blue.svg)](https://github.com/sbates130272/hsa-snoop)
 [![Spelling](https://github.com/ROCm/rocm-aic/actions/workflows/aic-spellcheck.yml/badge.svg)](https://github.com/ROCm/rocm-aic/actions/workflows/aic-spellcheck.yml)
@@ -37,31 +37,18 @@ repository provides a Docker image build and test harness, benchmarking
 harness, and Slurm/Spur automation used to validate and demonstrate the
 platform.
 
-## Stack overview
-
-```text
-Ubuntu 24.04  (rocm/dev-ubuntu-24.04:7.2.4-complete, ROCm 7.2.4, Python 3.12)
-  └── vLLM v0.25.0+rocm723  (pre-built wheel — bundles torch/triton/flash-attn)
-        └── LMCacheMPConnector (ZMQ)
-              └── LMCache server (standalone MP mode)  [v0.5.2 + 8 AMD patches]
-                    ├── L1:  GPU / CPU DRAM   (--l1-size-gb)
-                    │    or  hipFile NVMe slab (GDS L1 mode)
-                    ├── L2a: NIXL AIS_MT → local NVMe   (hipFile P2PDMA, GDS)
-                    └── L2b: NIXL POSIX  → NFS-over-RDMA
-```
-
-Component versions (pinned in `docker/Dockerfile` — update ARGs there before
-each release):
+## Stack Overview
 
 | Component | Source | Ref |
 | --- | --- | --- |
-| Base OS | `rocm/dev-ubuntu-24.04:7.2.4-complete` | Ubuntu 24.04, ROCm 7.2.4, Python 3.12 |
-| vLLM | `wheels.vllm.ai/rocm/0.25.0/rocm723` | v0.25.0+rocm723 (pre-built wheel, bundles torch) |
-| LMCache | `LMCache/LMCache` (upstream) | `v0.5.2` + 8 AMD patches |
+| Base OS | `rocm/dev-ubuntu-24.04:7.14.0-full` | Ubuntu 24.04, ROCm 7.14, Python 3.12 |
+| vLLM | `github.com/vllm-project/vllm` (source build) | `v0.26.0` + 3 AMD patches |
+| LMCache | `LMCache/LMCache` (upstream) | `v0.5.3` + 14 AMD patches |
 | NIXL | `ai-dynamo/nixl` (upstream) | `v1.3.2` + `nixl-rocm-ais-mt.patch` |
-| hipFile | `ROCm/rocm-systems` | `develop` @ `6901b670` |
+| hsa-snoop | `sbates130272/hsa-snoop` (source build) | `v1.0.0` |
+| hipFile | ROCm 7.14 base image | GA in ROCm 7.14 — no separate source build |
 
-## Pip-installable nightly wheels
+## Pip Nightly Wheels
 
 See [docs/PIP_WHEELS.md](docs/PIP_WHEELS.md) for installation instructions and
 compatibility notes. Wheels are rebuilt nightly from `main` and published to the
@@ -69,32 +56,30 @@ compatibility notes. Wheels are rebuilt nightly from `main` and published to the
 
 ## Prerequisites
 
-- ROCm-capable host (MI300X recommended; `gfx942`). The default build is
-  multi-arch — it bakes in every gfx the vLLM wheel supports (`gfx90a`, `gfx942`,
-  `gfx950`, and the RDNA `gfx11xx`/`gfx12xx` line), so one image runs on any of
-  them. Narrow with `ROCM_ARCH=gfx942` for a faster single-arch build.
+- ROCm-capable host. Pass `ROCM_ARCH` as a `;`-separated list (e.g. `gfx90a;gfx942;gfx950`)
+  to build a multi-arch image, or a single arch (e.g. `ROCM_ARCH=gfx942`) for a faster build.
+  The vLLM source build compiles GPU kernels for exactly the archs specified.
 - Docker with BuildKit and the `docker compose` (v2) plugin (Docker 23+). On a
   node that lacks it, `make ensure-compose` installs the plugin user-locally
   (`~/.docker/cli-plugins`); the Slurm cliff / smoke / tiny-test jobs self-install
-  it automatically. The whole stack is `docker compose` only — there is no
-  `docker-compose` v1 or docker-run fallback.
+  it automatically.
 - Host mounts: local NVMe (`NVME_DATA`) and NFS-over-RDMA (`NFS_DATA`) pre-mounted
 - HuggingFace token with access to the target model
 - Python 3.10+ for host-side benchmarks
 
-## Quick start
+## Quick Start
 
 See [docs/QUICK_START.md](docs/QUICK_START.md) for the full step-by-step guide
 (build, start, benchmark, plot). For Slurm / SPUR cluster usage see
 [docs/SLURM_SPUR.md](docs/SLURM_SPUR.md).
 
-## Metrics & observability
+## Metrics & Observability
 
 See [docs/METRICS_TELEMETRY.md](docs/METRICS_TELEMETRY.md) for the full
 Prometheus scrape config, exporter details, NIXL telemetry, hsa-snoop, and
 NFS caveats.
 
-## Key environment variables
+## Key Environment Variables
 
 See [docs/ENVIRONMENT.md](docs/ENVIRONMENT.md) for the full reference.
 

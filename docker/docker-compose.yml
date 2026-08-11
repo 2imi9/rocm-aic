@@ -62,14 +62,25 @@
 #   LMCACHE_NVME_POOL      — nixl pool slots for NVMe adapter (default: 4096)
 #   LMCACHE_NVME_SLOT_SIZE — nixl file size per slot in bytes (default: 256 MiB)
 #   LMCACHE_NFS_POOL       — nixl pool slots for NFS adapter (default: 1024)
-#   AIC_NIXL_USE_DIRECT_IO — O_DIRECT for the AIS_MT NVMe L2 (default: true)
+#   AIC_NIXL_BACKEND             — NIXL plugin for the nixl arm: AIS_MT (default, hipFile P2PDMA) or
+#                                  POSIX (first-class POSIX plugin, cpu buffer, no GPUDirect required)
+#   AIC_NIXL_USE_DIRECT_IO       — O_DIRECT for the AIS_MT NVMe L2 (default: true). POSIX always uses buffered I/O.
+#   LMCACHE_NIXL_POSIX_SLOT_SIZE — slot file size in bytes for the POSIX backend (default: 16 MiB).
+#                                  Should match actual KV chunk bytes; smaller than AIS_MT's 256 MiB.
+#   LMCACHE_NIXL_POSIX_POOL      — pool slot count for the POSIX backend (default: 32768).
+#   LMCACHE_MAX_GPU_WORKERS      — lmcache --max-gpu-workers for parallel STORE/RETRIEVE (default: 1).
 #   VLM_GPU_MEMORY_UTILIZATION — vllm --gpu-memory-utilization (default: 0.90)
 #   VLM_MAX_MODEL_LEN          — vllm --max-model-len (default: 32768)
 #   VLM_MAX_NUM_BATCHED_TOKENS — vllm --max-num-batched-tokens (default: 4096)
+#   VLM_BLOCK_SIZE             — vllm --block-size (default: 64)
 #   VLM_ATTENTION_BACKEND      — vllm --attention-backend (default: TRITON_ATTN)
 #   VLM_KV_CACHE_DTYPE         — vllm --kv-cache-dtype (default: fp8)
 #   VLLM_EXTRA_ARGS            — extra vllm args appended verbatim (e.g. --hf-overrides ...)
 #   TENSOR_PARALLEL_SIZE       — vllm --tensor-parallel-size (default: 1)
+
+networks:
+  aic:
+    name: aic
 
 services:
 
@@ -88,6 +99,8 @@ services:
       # monitoring/ paths still resolve.
       context: ..
       dockerfile: docker/Dockerfile
+      additional_contexts:
+        pip-wheels: ${AIC_PIP_WHEELS_DIR:-/opt/pip-cache/wheels}
       args:
         AIC_VERSION:
         ROCM_VERSION:
@@ -103,14 +116,14 @@ services:
     image: ${IMAGE_REF:-${IMAGE_NAME:-rocm-aic}:latest}
     container_name: aic-lmcache
     # Cross-container HIP IPC (LMCacheMPConnector registering vLLM's KV tensors) on
-    # ROCm requires the two containers to share host networking + IPC + a PID
-    # namespace.  lmcache owns shareable IPC and its default PID namespace here;
-    # the vllm service JOINS both via `ipc: service:lmcache` and
-    # `pid: service:lmcache` (see below), rather than either using host IPC/PID.
+    # ROCm requires the two containers to share IPC + a PID namespace.  lmcache owns
+    # shareable IPC and its default PID namespace here; the vllm service JOINS both
+    # via `ipc: service:lmcache` and `pid: service:lmcache` (see below).
     # Host PID makes `docker rm` hang on teardown; container-shared does not.
-    # A bridge network fails IPC (hipErrorInvalidContext); host net is required.
-    # Ports exposed on the host: lmcache 8080, NIXL telemetry ${NIXL_METRICS_PORT:-19090}.
-    network_mode: host
+    # IPC namespace sharing is independent of network_mode — the aic bridge network
+    # provides DNS-based service discovery for prometheus without affecting IPC.
+    # Ports reachable within the aic network: lmcache HTTP API 8080, NIXL telemetry 19090.
+    networks: [aic]
     ipc: shareable
     shm_size: "${AIC_SHM_SIZE:-64gb}"
     cap_add:
@@ -158,10 +171,18 @@ services:
       - LMCACHE_NVME_SLOT_SIZE=${LMCACHE_NVME_SLOT_SIZE:-268435456}
       - LMCACHE_NFS_POOL=${LMCACHE_NFS_POOL:-1024}
       - AIC_NIXL_USE_DIRECT_IO=${AIC_NIXL_USE_DIRECT_IO:-true}
+      - AIC_NIXL_BACKEND=${AIC_NIXL_BACKEND:-AIS_MT}
+      - LMCACHE_NIXL_POSIX_SLOT_SIZE=${LMCACHE_NIXL_POSIX_SLOT_SIZE:-16777216}
+      - LMCACHE_NIXL_POSIX_POOL=${LMCACHE_NIXL_POSIX_POOL:-32768}
+      - LMCACHE_MAX_GPU_WORKERS=${LMCACHE_MAX_GPU_WORKERS:-1}
+      - LMCACHE_L2_PREFETCH_MAX_IN_FLIGHT=${LMCACHE_L2_PREFETCH_MAX_IN_FLIGHT:-4}
       # Only set when a real config file is mounted (local_disk / advanced tuning).
       - LMCACHE_CONFIG_FILE=${LMCACHE_CONFIG_FILE:-}
       - HIPFILE_ALLOW_COMPAT_MODE=false
-      - HIPFILE_UNSUPPORTED_FILE_SYSTEMS=true
+      # Keep hipFile's storage validation enabled. Bypassing it can issue direct
+      # I/O against unsupported layouts and risks data corruption.
+      - HIPFILE_UNSUPPORTED_FILE_SYSTEMS=false
+
       # NIXL native Prometheus telemetry exporter (serves /metrics on :19090).
       # Requires the prometheus-cpp plugin compiled into the image (build-nixl.sh);
       # a no-op fallback if absent.  Set NIXL_TELEMETRY_ENABLE= to disable.
@@ -183,9 +204,12 @@ services:
           exec lmcache server \
             --no-separate-object-groups \
             --host 0.0.0.0 \
+            --http-port 8080 \
             --port "$$LMCACHE_PORT" \
             --l1-size-gb "$$LMCACHE_L1_SIZE_GB" \
             --eviction-policy LRU \
+            --max-gpu-workers "$${LMCACHE_MAX_GPU_WORKERS:-1}" \
+            --worker-reap-timeout-seconds "$${LMCACHE_WORKER_REAP_TIMEOUT:-3600}" \
             --gds-l1-path /data/slab
         elif [ "$$AIC_L2_BACKEND" = "local_disk" ] || [ "$$AIC_L2_BACKEND" = "none" ]; then
           # DRAM L1 only on the CLI.  local_disk adds a native LocalDiskBackend L2
@@ -194,9 +218,28 @@ services:
           exec lmcache server \
             --no-separate-object-groups \
             --host 0.0.0.0 \
+            --http-port 8080 \
             --port "$$LMCACHE_PORT" \
             --l1-size-gb "$$LMCACHE_L1_SIZE_GB" \
-            --eviction-policy LRU
+            --eviction-policy LRU \
+            --max-gpu-workers "$${LMCACHE_MAX_GPU_WORKERS:-1}" \
+            --worker-reap-timeout-seconds "$${LMCACHE_WORKER_REAP_TIMEOUT:-3600}"
+        elif [ "$${AIC_NIXL_BACKEND:-AIS_MT}" = "POSIX" ] || [ "$$AIC_L2_BACKEND" = "nixl_posix" ]; then
+          # NIXL first-class POSIX plugin (cpu staging buffer, no hipFileBufRegister).
+          # Use for nodes where GPUDirect P2PDMA is unavailable (e.g. XFS LVM).
+          # No NFS L2b — single POSIX NVMe L2 with buffered I/O.
+          # Uses LMCACHE_NIXL_POSIX_SLOT_SIZE (16 MiB default) rather than the
+          # AIS_MT 256 MiB staging-buffer size: POSIX writes actual KV bytes per slot.
+          exec lmcache server \
+            --host 0.0.0.0 \
+            --http-port 8080 \
+            --port "$$LMCACHE_PORT" \
+            --l1-size-gb "$$LMCACHE_L1_SIZE_GB" \
+            --eviction-policy LRU \
+            --max-gpu-workers "$${LMCACHE_MAX_GPU_WORKERS:-1}" \
+            --l2-prefetch-max-in-flight "$${LMCACHE_L2_PREFETCH_MAX_IN_FLIGHT:-4}" \
+            --worker-reap-timeout-seconds "$${LMCACHE_WORKER_REAP_TIMEOUT:-3600}" \
+            --l2-adapter "{\"type\":\"nixl_store\",\"backend\":\"POSIX\",\"backend_params\":{\"file_path\":\"/data/nvme/lmcache\",\"use_direct_io\":\"false\",\"file_size\":\"$$LMCACHE_NIXL_POSIX_SLOT_SIZE\"},\"pool_size\":$$LMCACHE_NIXL_POSIX_POOL}"
         else
           # nixl AIS_MT NVMe L2a + POSIX NFS L2b.  Both are file-based nixl_store
           # backends, so both backend_params MUST include use_direct_io (LMCache
@@ -204,9 +247,12 @@ services:
           exec lmcache server \
             --no-separate-object-groups \
             --host 0.0.0.0 \
+            --http-port 8080 \
             --port "$$LMCACHE_PORT" \
             --l1-size-gb "$$LMCACHE_L1_SIZE_GB" \
             --eviction-policy LRU \
+            --max-gpu-workers "$${LMCACHE_MAX_GPU_WORKERS:-1}" \
+            --worker-reap-timeout-seconds "$${LMCACHE_WORKER_REAP_TIMEOUT:-3600}" \
             --l2-adapter "{\"type\":\"nixl_store\",\"backend\":\"AIS_MT\",\"backend_params\":{\"file_path\":\"/data/nvme/lmcache\",\"use_direct_io\":\"$$AIC_NIXL_USE_DIRECT_IO\",\"file_size\":\"$$LMCACHE_NVME_SLOT_SIZE\"},\"pool_size\":$$LMCACHE_NVME_POOL}" \
             --l2-adapter "{\"type\":\"nixl_store\",\"backend\":\"POSIX\",\"backend_params\":{\"file_path\":\"/data/nfs/lmcache\",\"use_direct_io\":\"false\"},\"pool_size\":$$LMCACHE_NFS_POOL}"
         fi
@@ -227,13 +273,13 @@ services:
   vllm:
     image: ${IMAGE_REF:-${IMAGE_NAME:-rocm-aic}:latest}
     container_name: aic-vllm-gpu${GPU:-0}
-    # host net + shared IPC/PID namespaces with lmcache: required for cross-container
-    # HIP IPC KV registration (see the lmcache service).  vllm joins lmcache's
-    # shareable IPC namespace by default; cache-backed launch paths also set
-    # VLLM_PID_MODE=service:lmcache so it joins lmcache's PID namespace.  Set
-    # VLLM_IPC_MODE=shareable when starting vllm alone for the plain baseline.
-    # vLLM OpenAI API + /metrics on host :8000.
-    network_mode: host
+    # Shared IPC/PID namespaces with lmcache: required for cross-container HIP IPC
+    # KV registration (see the lmcache service).  vllm joins lmcache's shareable IPC
+    # namespace by default; cache-backed launch paths also set VLLM_PID_MODE=service:lmcache
+    # so it joins lmcache's PID namespace.  Set VLLM_IPC_MODE=shareable when starting
+    # vllm alone for the plain baseline.
+    # vLLM OpenAI API + /metrics reachable within the aic network on port 8000.
+    networks: [aic]
     ipc: "${VLLM_IPC_MODE:-service:lmcache}"
     # Applied when vllm owns its IPC namespace; ignored when it joins lmcache.
     shm_size: "${AIC_SHM_SIZE:-64gb}"
@@ -260,6 +306,7 @@ services:
       - VLLM_CONFIG_ROOT=/hf/vllm_config
       - TORCH_HOME=/hf/torch
       - TORCHINDUCTOR_CACHE_DIR=/hf/torch_inductor
+      - VLLM_TARGET_DEVICE=rocm
       - ROCR_VISIBLE_DEVICES=${GPU:-0}
       - AMDGCN_USE_BUFFER_OPS=0
       - MIOPEN_FIND_MODE=FAST
@@ -275,6 +322,12 @@ services:
       - PYTORCH_HIP_ALLOC_CONF=${PYTORCH_HIP_ALLOC_CONF:-expandable_segments:False}
       - PYTHONHASHSEED=0
       - TZ=${TZ:-America/Edmonton}
+      # Set to DEBUG to enable "vLLM hit is: N" log lines in the connector
+      # (lmcache_mp_connector.py:798) — useful for diagnosing ext_hit=0.
+      - VLLM_LOGGING_LEVEL=${VLLM_LOGGING_LEVEL:-WARNING}
+      # Enable vLLM dev endpoints: POST /reset_prefix_cache, /reset_mm_cache, etc.
+      # Required to flush the GPU-side prefix cache via API without restarting vLLM.
+      - VLLM_SERVER_DEV_MODE=${VLLM_SERVER_DEV_MODE:-1}
     command: >
       --model ${VLLM_MODEL:-openai/gpt-oss-120b}
         --host 0.0.0.0
@@ -284,13 +337,13 @@ services:
         --max-model-len ${VLM_MAX_MODEL_LEN:-32768}
         --max-num-batched-tokens ${VLM_MAX_NUM_BATCHED_TOKENS:-4096}
         --load-format ${VLM_LOAD_FORMAT:-fastsafetensors}
-        --block-size 64
+        --block-size ${VLM_BLOCK_SIZE:-64}
         --enable-prefix-caching
         --kv-cache-dtype ${VLM_KV_CACHE_DTYPE:-fp8}
         --attention-backend ${VLM_ATTENTION_BACKEND:-TRITON_ATTN}
         --stream-interval 20
         --async-scheduling
-        --disable-access-log-for-endpoints "/health,/metrics,/v1/models"
+        --disable-access-log-for-endpoints "/health,/metrics,/v1/models,/v1/chat/completions,/v1/completions,/reset_prefix_cache"
         --enable-mfu-metrics
         ${KV_TRANSFER_ARG:-}
         ${VLLM_EXTRA_ARGS:-}
@@ -300,3 +353,126 @@ services:
         # required:false lets the plain baseline run `vllm` alone (lmcache not in
         # the active profile) without a dependency error (needs Compose v2.20+).
         required: false
+
+  # ---------------------------------------------------------------------------
+  # client: lightweight Alpine container on the aic network for ad-hoc testing.
+  # Use `docker exec -it aic-client sh` to get a shell with curl available,
+  # then hit vllm/lmcache by container name (e.g. http://aic-vllm-gpu0:8000).
+  # Always up alongside the inference stack; consumes negligible resources.
+  # ---------------------------------------------------------------------------
+  client:
+    image: curlimages/curl:latest
+    container_name: aic-client
+    networks: [aic]
+    dns: ["127.0.0.11"]
+    entrypoint: ["tail", "-f", "/dev/null"]
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # prometheus: scrapes all stack targets by container name via the aic network.
+  # Behind the `monitoring` profile — start with `make up-monitoring` or
+  # `docker compose --profile cache --profile monitoring up`.
+  # TSDB written to AIC_METRICS_DIR (default: ../logs/prometheus).
+  # PROM_UID/PROM_GID must be set so prometheus can write the TSDB dir;
+  # `make up-monitoring` sets them automatically to the current user.
+  # ---------------------------------------------------------------------------
+  prometheus:
+    profiles: [monitoring]
+    image: ${AIC_PROM_IMAGE:-prom/prometheus:v2.55.1}
+    container_name: aic-prometheus
+    networks: [aic]
+    extra_hosts:
+      - "host-gateway:host-gateway"
+    user: "${PROM_UID:-65534}:${PROM_GID:-65534}"
+    restart: unless-stopped
+    volumes:
+      - ../monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ../monitoring/prometheus/rules:/etc/prometheus/rules:ro
+      - ${AIC_METRICS_DIR:-../logs/prometheus}:/prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=${AIC_PROM_RETENTION:-90d}
+      - --web.enable-lifecycle
+      - --web.listen-address=:${AIC_PROM_PORT:-9090}
+
+  # ---------------------------------------------------------------------------
+  # node-exporter: host CPU/mem/disk/net/NVMe/RDMA metrics on :9100.
+  # Behind the `monitoring` profile.  Uses pid:host for accurate per-process
+  # CPU stats; mounts the host rootfs read-only via /host.
+  # ---------------------------------------------------------------------------
+  node-exporter:
+    profiles: [monitoring]
+    image: ${AIC_NODE_EXPORTER_IMAGE:-quay.io/prometheus/node-exporter:v1.12.1}
+    container_name: aic-node-exporter
+    networks: [aic]
+    pid: host
+    restart: unless-stopped
+    volumes:
+      - /:/host:ro,rslave
+    command:
+      - --path.rootfs=/host
+      - --collector.diskstats
+      - --collector.nvme
+      - --collector.infiniband
+      - --web.listen-address=:9100
+
+  # ---------------------------------------------------------------------------
+  # amdgpu-exporter: AMD device-metrics-exporter, gpu_* metrics on :5000.
+  # Behind the `monitoring` profile.
+  # ---------------------------------------------------------------------------
+  amdgpu-exporter:
+    profiles: [monitoring]
+    image: ${AIC_AMDGPU_EXPORTER_IMAGE:-rocm/device-metrics-exporter:v1.5.1}
+    container_name: aic-amdgpu-exporter
+    networks: [aic]
+    restart: unless-stopped
+    devices:
+      - /dev/kfd
+      - /dev/dri
+    volumes:
+      - /sys:/sys:ro
+      - ../monitoring/amdgpu-exporter/config.json:/etc/metrics/config.json:ro
+
+  # ---------------------------------------------------------------------------
+  # nvme-exporter: NVMe Prometheus exporter on :9998.
+  # Behind the `monitoring` profile.  Requires a pre-built image:
+  #   make monitoring-build-exporters
+  # CAP_SYS_ADMIN + /dev bind-mount for nvme-cli ioctl; no host networking needed.
+  # ---------------------------------------------------------------------------
+  nvme-exporter:
+    profiles: [monitoring]
+    image: ${AIC_NVME_EXPORTER_IMAGE:-aic-nvme-exporter:local}
+    container_name: aic-nvme-exporter
+    networks: [aic]
+    cap_add:
+      - SYS_ADMIN
+    restart: unless-stopped
+    volumes:
+      - /dev:/dev
+      - /sys:/sys:ro
+
+  # ---------------------------------------------------------------------------
+  # rdma-exporter: RDMA/RoCE sysfs Prometheus exporter on :9879.
+  # Behind the `monitoring` profile.  Requires a pre-built image:
+  #   make monitoring-build-exporters
+  # Reads RDMA stats from sysfs only; no host networking or extra caps needed.
+  # ---------------------------------------------------------------------------
+  rdma-exporter:
+    profiles: [monitoring]
+    image: ${AIC_RDMA_EXPORTER_IMAGE:-aic-rdma-exporter:local}
+    container_name: aic-rdma-exporter
+    networks: [aic]
+    restart: unless-stopped
+    volumes:
+      - /sys:/sys:ro
+    command:
+      - --listen-address=:9879
+      - --metrics-path=/metrics
+      - --health-path=/health
+      - --enable-roce-pfc-metrics=false
+
+  # hsa-snoop is intentionally omitted here: it requires exclusive access to
+  # /sys/kernel/tracing/trace_pipe and conflicts with any host hsa-snoop service.
+  # If no host hsa-snoop is running, launch it via the monitoring compose:
+  #   docker compose -f monitoring/docker-compose.monitoring.yml --profile exporters up -d hsa-snoop
