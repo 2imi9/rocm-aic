@@ -72,6 +72,7 @@
 #   VLM_GPU_MEMORY_UTILIZATION — vllm --gpu-memory-utilization (default: 0.90)
 #   VLM_MAX_MODEL_LEN          — vllm --max-model-len (default: 32768)
 #   VLM_MAX_NUM_BATCHED_TOKENS — vllm --max-num-batched-tokens (default: 4096)
+#   VLM_BLOCK_SIZE             — vllm --block-size (default: 64)
 #   VLM_ATTENTION_BACKEND      — vllm --attention-backend (default: TRITON_ATTN)
 #   VLM_KV_CACHE_DTYPE         — vllm --kv-cache-dtype (default: fp8)
 #   VLLM_EXTRA_ARGS            — extra vllm args appended verbatim (e.g. --hf-overrides ...)
@@ -333,7 +334,7 @@ services:
         --max-model-len ${VLM_MAX_MODEL_LEN:-32768}
         --max-num-batched-tokens ${VLM_MAX_NUM_BATCHED_TOKENS:-4096}
         --load-format ${VLM_LOAD_FORMAT:-fastsafetensors}
-        --block-size 64
+        --block-size ${VLM_BLOCK_SIZE:-64}
         --enable-prefix-caching
         --kv-cache-dtype ${VLM_KV_CACHE_DTYPE:-fp8}
         --attention-backend ${VLM_ATTENTION_BACKEND:-TRITON_ATTN}
