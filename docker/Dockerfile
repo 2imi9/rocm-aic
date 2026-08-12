@@ -135,8 +135,10 @@ ENV PATH=/usr/local/go/bin:/opt/rocm/bin:${PATH}
 
 # Pin by full commit SHA and verify it: a moved tag or a rewritten branch must
 # fail the build rather than silently ship a different Mooncake.
-RUN git clone --filter=blob:none "${MOONCAKE_GIT_URL}" /src/Mooncake && \
-    git -C /src/Mooncake checkout --detach "${MOONCAKE_REF}" && \
+RUN git init /src/Mooncake && \
+    git -C /src/Mooncake remote add origin "${MOONCAKE_GIT_URL}" && \
+    git -C /src/Mooncake fetch --depth 1 origin "${MOONCAKE_REF}" && \
+    git -C /src/Mooncake checkout --detach FETCH_HEAD && \
     test "$(git -C /src/Mooncake rev-parse HEAD)" = "${MOONCAKE_REF}" \
         || { echo "ERROR: Mooncake checkout is not ${MOONCAKE_REF}" >&2; exit 1; }
 
