@@ -24,7 +24,8 @@
 # Targets that are absent for a given run simply show as `down` -- harmless.
 
 global:
-  scrape_interval: 5s        # cliff arms are short; keep resolution high
+  scrape_interval: 15s       # lmcache /metrics can block under load; 15s prevents gaps
+  scrape_timeout: 10s        # must be < scrape_interval; gives lmcache 10s to respond
   evaluation_interval: 15s
   external_labels:
     cluster: AIC
