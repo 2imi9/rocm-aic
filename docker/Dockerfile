@@ -241,6 +241,10 @@ RUN set -eu; \
 # load time).  `pip` is what the script probes for.
 RUN set -eu; \
     command -v pip >/dev/null || ln -s "$(command -v pip3)" /usr/local/bin/pip; \
+    python${MOONCAKE_PYTHON_VERSION} -m pip install \
+        --ignore-installed \
+        --constraint /etc/mooncake-wheel-build.txt \
+        pip build setuptools wheel auditwheel; \
     cd /src/Mooncake; \
     export PATH="/opt/rocm/bin:/usr/local/go/bin:${PATH}"; \
     export LD_LIBRARY_PATH="/usr/local/lib:${LD_LIBRARY_PATH:-}"; \
