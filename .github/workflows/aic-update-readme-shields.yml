@@ -11,6 +11,8 @@ on:
   push:
     branches: [main]
     paths: [docker/Dockerfile]
+  pull_request:
+    paths: [.github/workflows/aic-update-readme-shields.yml]
   workflow_dispatch:
 
 jobs:
@@ -27,52 +29,105 @@ jobs:
       - name: Extract versions from Dockerfile
         id: vers
         run: |
-          ROCM=$(grep '^FROM' docker/Dockerfile | grep -oP '\d+\.\d+\.\d+' | head -1)
-          VLLM_VER=$(grep 'ARG VLLM_VERSION=' docker/Dockerfile | grep -oP '[\d.]+')
-          VLLM_ROC=$(grep 'ARG VLLM_ROCM_VARIANT=' docker/Dockerfile | grep -oP 'rocm\w+')
-          LMCACHE=$(grep 'ARG LMCACHE_REF=' docker/Dockerfile | grep -oP 'v[\d.]+')
-          NIXL=$(grep 'ARG NIXL_REF=' docker/Dockerfile | grep -oP 'v[\d.]+')
-          HSA=$(grep 'ARG HSA_SNOOP_REF=' docker/Dockerfile | grep -oP 'v[\d.]+')
-          echo "rocm=$ROCM"                    >> "$GITHUB_OUTPUT"
-          echo "vllm=${VLLM_VER}+${VLLM_ROC}" >> "$GITHUB_OUTPUT"
-          echo "vllm_ver=$VLLM_VER"            >> "$GITHUB_OUTPUT"
-          echo "vllm_roc=$VLLM_ROC"            >> "$GITHUB_OUTPUT"
-          echo "lmcache=$LMCACHE"              >> "$GITHUB_OUTPUT"
-          echo "nixl=$NIXL"                    >> "$GITHUB_OUTPUT"
-          echo "hsa=$HSA"                      >> "$GITHUB_OUTPUT"
+          set -euo pipefail
+          arg() {
+            local name="$1" value
+            value="$(awk -v prefix="ARG ${name}=" '
+              index($0, prefix) == 1 {
+                print substr($0, length(prefix) + 1)
+                exit
+              }
+            ' docker/Dockerfile)"
+            test -n "${value}" || {
+              echo "ERROR: ${name} is not set in docker/Dockerfile" >&2
+              return 1
+            }
+            printf '%s\n' "${value}"
+          }
+
+          ROCM="$(arg ROCM_VERSION)"
+          ROCM_BASE_IMAGE="$(arg ROCM_BASE_IMAGE)"
+          ROCM_BASE_IMAGE="${ROCM_BASE_IMAGE//\$\{ROCM_VERSION\}/${ROCM}}"
+          VLLM="$(arg VLLM_REF)"
+          LMCACHE="$(arg LMCACHE_REF)"
+          NIXL="$(arg NIXL_REF)"
+          HSA="$(arg HSA_SNOOP_REF)"
+
+          case "${ROCM_BASE_IMAGE}" in
+            *\$\{*)
+              echo "ERROR: unresolved variable in ROCM_BASE_IMAGE=${ROCM_BASE_IMAGE}" >&2
+              exit 1
+              ;;
+          esac
+
+          {
+            echo "rocm=${ROCM}"
+            echo "rocm_base=${ROCM_BASE_IMAGE}"
+            echo "vllm=${VLLM}"
+            echo "lmcache=${LMCACHE}"
+            echo "nixl=${NIXL}"
+            echo "hsa=${HSA}"
+          } >> "${GITHUB_OUTPUT}"
 
       - name: Update README shields and prose
         env:
-          ROCM:     ${{ steps.vers.outputs.rocm }}
-          VLLM:     ${{ steps.vers.outputs.vllm }}
-          VLLM_VER: ${{ steps.vers.outputs.vllm_ver }}
-          VLLM_ROC: ${{ steps.vers.outputs.vllm_roc }}
-          LMCACHE:  ${{ steps.vers.outputs.lmcache }}
-          NIXL:     ${{ steps.vers.outputs.nixl }}
-          HSA:      ${{ steps.vers.outputs.hsa }}
+          ROCM:      ${{ steps.vers.outputs.rocm }}
+          ROCM_BASE: ${{ steps.vers.outputs.rocm_base }}
+          VLLM:      ${{ steps.vers.outputs.vllm }}
+          LMCACHE:   ${{ steps.vers.outputs.lmcache }}
+          NIXL:      ${{ steps.vers.outputs.nixl }}
+          HSA:       ${{ steps.vers.outputs.hsa }}
         run: |
-          # Badge URLs
-          sed -i "s|ROCm-[0-9.]*-green|ROCm-${ROCM}-green|g" README.md
-          sed -i "s|vLLM-[^-]*-blue\.svg|vLLM-${VLLM}-blue.svg|" README.md
-          sed -i "s|LMCache-v[0-9.]*-blue\.svg|LMCache-${LMCACHE}-blue.svg|" README.md
-          sed -i "s|NIXL-v[0-9.]*-blue\.svg|NIXL-${NIXL}-blue.svg|" README.md
-          sed -i "s|hsa--snoop-v[0-9.]*-blue\.svg|hsa--snoop-${HSA}-blue.svg|" README.md
+          set -euo pipefail
+          LMCACHE_PATCH_COUNT="$(find patches/lmcache -maxdepth 1 -name '*.patch' | awk 'END { print NR }')"
+          test "${LMCACHE_PATCH_COUNT}" -gt 0
+          export LMCACHE_PATCH_COUNT
+          python3 - <<'PY'
+          import os
+          import re
+          from pathlib import Path
 
-          # Stack overview diagram (line starting with "rocm/dev-ubuntu-24.04:")
-          sed -i "s|rocm/dev-ubuntu-24.04:[0-9.]*-complete|rocm/dev-ubuntu-24.04:${ROCM}-complete|g" README.md
-          sed -i "s|ROCm [0-9.]*\(, Python\)|ROCm ${ROCM}\1|g" README.md
-          # vLLM in diagram/table (e.g. "v0.25.0+rocm723" or "0.25.0+rocm723")
-          sed -i "s|vLLM v[0-9.+a-z]*  (pre-built|vLLM v${VLLM}  (pre-built|" README.md
-          sed -i "s|v[0-9.]*+rocm[0-9]* (pre-built wheel, bundles torch)|v${VLLM} (pre-built wheel, bundles torch)|" README.md
-          # vLLM source URL in component table
-          sed -i "s|wheels\.vllm\.ai/rocm/[0-9.]*/rocm[0-9]*|wheels.vllm.ai/rocm/${VLLM_VER}/${VLLM_ROC}|" README.md
-          # LMCache version in prose (table row)
-          PATCH_COUNT=$(ls patches/lmcache/*.patch 2>/dev/null | wc -l)
-          sed -i "s|\`v[0-9.]*\` + [0-9]* AMD patches|\`${LMCACHE}\` + ${PATCH_COUNT} AMD patches|" README.md
-          # NIXL version in table row
-          sed -i "s|\`v[0-9.]*\` + \`nixl-rocm|\`${NIXL}\` + \`nixl-rocm|" README.md
+          path = Path("README.md")
+          text = path.read_text()
+
+          def replace(pattern: str, replacement: str, label: str) -> None:
+              global text
+              text, count = re.subn(pattern, replacement, text, flags=re.MULTILINE)
+              if count != 1:
+                  raise SystemExit(f"README sync: expected one {label}, found {count}")
+
+          rocm = os.environ["ROCM"]
+          rocm_short = ".".join(rocm.split(".")[:2])
+          vllm = os.environ["VLLM"]
+          lmcache = os.environ["LMCACHE"]
+          nixl = os.environ["NIXL"]
+          hsa = os.environ["HSA"]
+          patches = os.environ["LMCACHE_PATCH_COUNT"]
+          updates = (
+              ("ROCm badge", r"ROCm-[0-9.]+-green", f"ROCm-{rocm}-green"),
+              ("vLLM badge", r"vLLM-[^/]+?-blue\.svg", f"vLLM-{vllm}-blue.svg"),
+              ("LMCache badge", r"LMCache-[^/]+?-blue\.svg", f"LMCache-{lmcache}-blue.svg"),
+              ("NIXL badge", r"NIXL-[^/]+?-blue\.svg", f"NIXL-{nixl}-blue.svg"),
+              ("hsa-snoop badge", r"hsa--snoop-[^/]+?-blue\.svg", f"hsa--snoop-{hsa}-blue.svg"),
+              ("base image row", r"(\| Base OS \| )`[^`]+`( \| Ubuntu 24\.04, ROCm )[0-9.]+(, Python 3\.12 \|)", rf'\g<1>`{os.environ["ROCM_BASE"]}`\g<2>{rocm_short}\g<3>'),
+              ("vLLM row", r"(\| vLLM \| [^|]+ \| )`[^`]+`( \+ [0-9]+ AMD patches \|)", rf"\g<1>`{vllm}`\g<2>"),
+              ("LMCache row", r"(\| LMCache \| [^|]+ \| )`[^`]+` \+ [0-9]+ AMD patches \|", rf"\g<1>`{lmcache}` + {patches} AMD patches |"),
+              ("NIXL row", r"(\| NIXL \| [^|]+ \| )`[^`]+`( \+ `nixl-rocm-ais-mt\.patch` \|)", rf"\g<1>`{nixl}`\g<2>"),
+              ("hsa-snoop row", r"(\| hsa-snoop \| [^|]+ \| )`[^`]+`( \|)", rf"\g<1>`{hsa}`\g<2>"),
+              ("hipFile row", r"(\| hipFile \| ROCm )[0-9.]+( base image \|)", rf"\g<1>{rocm_short}\g<2>"),
+          )
+          for label, pattern, replacement in updates:
+              replace(pattern, replacement, label)
+
+          path.write_text(text)
+          PY
+
+      - name: Verify workflow keeps the current README in sync
+        if: github.event_name == 'pull_request'
+        run: git diff --exit-code -- README.md
 
       - name: Open PR if README changed
+        if: github.event_name != 'pull_request'
         uses: peter-evans/create-pull-request@v7
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
