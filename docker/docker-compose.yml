@@ -69,6 +69,16 @@
 #                                  Should match actual KV chunk bytes; smaller than AIS_MT's 256 MiB.
 #   LMCACHE_NIXL_POSIX_POOL      — pool slot count for the POSIX backend (default: 32768).
 #   LMCACHE_MAX_GPU_WORKERS      — lmcache --max-gpu-workers for parallel STORE/RETRIEVE (default: 1).
+#   LMCACHE_COORDINATOR_URL      — base URL the MP server registers/heartbeats against
+#                                  (default: http://aic-lmcache-coordinator:9300).
+#                                  Unset to disable coordinator registration entirely.
+#   LMCACHE_COORDINATOR_PORT     — coordinator HTTP port (default: 9300); /metrics on COORDINATOR_METRICS_PORT (default: 9301).
+#   COORDINATOR_METRICS_PORT     — Prometheus /metrics port on the coordinator container (default: 9301).
+#   LMCACHE_COORDINATOR_INSTANCE_TIMEOUT — seconds without heartbeat before instance eviction (default: 120).
+#   LMCACHE_COORDINATOR_HEALTH_INTERVAL  — seconds between heartbeat-sweep runs (default: 10).
+#   LMCACHE_COORDINATOR_EVICTION_INTERVAL — seconds between L2 eviction-check runs (default: 5).
+#   LMCACHE_COORDINATOR_KEEPALIVE — uvicorn keep-alive timeout in seconds (default: 65).
+#   LMCACHE_CHUNK_SIZE           — tokens per KV chunk; must match MP server and coordinator (default: 256).
 #   VLM_GPU_MEMORY_UTILIZATION — vllm --gpu-memory-utilization (default: 0.90)
 #   VLM_MAX_MODEL_LEN          — vllm --max-model-len (default: 32768)
 #   VLM_MAX_NUM_BATCHED_TOKENS — vllm --max-num-batched-tokens (default: 4096)
@@ -176,6 +186,10 @@ services:
       - LMCACHE_NIXL_POSIX_POOL=${LMCACHE_NIXL_POSIX_POOL:-32768}
       - LMCACHE_MAX_GPU_WORKERS=${LMCACHE_MAX_GPU_WORKERS:-1}
       - LMCACHE_L2_PREFETCH_MAX_IN_FLIGHT=${LMCACHE_L2_PREFETCH_MAX_IN_FLIGHT:-4}
+      # Coordinator registration: the MP server registers, heartbeats, and
+      # deregisters against the coordinator so it can track which blocks are held.
+      # Unset LMCACHE_COORDINATOR_URL to run without coordinator (standalone mode).
+      - LMCACHE_COORDINATOR_URL=${LMCACHE_COORDINATOR_URL:-http://aic-lmcache-coordinator:9300}
       # Only set when a real config file is mounted (local_disk / advanced tuning).
       - LMCACHE_CONFIG_FILE=${LMCACHE_CONFIG_FILE:-}
       - HIPFILE_ALLOW_COMPAT_MODE=false
@@ -200,6 +214,11 @@ services:
     entrypoint: ["/bin/bash", "-o", "pipefail", "-c"]
     command:
       - |
+        # Build coordinator flags once; empty when LMCACHE_COORDINATOR_URL is unset.
+        _COORD_FLAGS=""
+        if [ -n "$${LMCACHE_COORDINATOR_URL:-}" ]; then
+          _COORD_FLAGS="--coordinator-url $$LMCACHE_COORDINATOR_URL --coordinator-event-reporting"
+        fi
         if [ "${GDS_MODE:-0}" = "1" ]; then
           exec lmcache server \
             --no-separate-object-groups \
@@ -210,7 +229,8 @@ services:
             --eviction-policy LRU \
             --max-gpu-workers "$${LMCACHE_MAX_GPU_WORKERS:-1}" \
             --worker-reap-timeout-seconds "$${LMCACHE_WORKER_REAP_TIMEOUT:-3600}" \
-            --gds-l1-path /data/slab
+            --gds-l1-path /data/slab \
+            $$_COORD_FLAGS
         elif [ "$$AIC_L2_BACKEND" = "local_disk" ] || [ "$$AIC_L2_BACKEND" = "none" ]; then
           # DRAM L1 only on the CLI.  local_disk adds a native LocalDiskBackend L2
           # via the mounted LMCACHE_CONFIG_FILE; none = pure DRAM (the minimal MP
@@ -223,7 +243,8 @@ services:
             --l1-size-gb "$$LMCACHE_L1_SIZE_GB" \
             --eviction-policy LRU \
             --max-gpu-workers "$${LMCACHE_MAX_GPU_WORKERS:-1}" \
-            --worker-reap-timeout-seconds "$${LMCACHE_WORKER_REAP_TIMEOUT:-3600}"
+            --worker-reap-timeout-seconds "$${LMCACHE_WORKER_REAP_TIMEOUT:-3600}" \
+            $$_COORD_FLAGS
         elif [ "$${AIC_NIXL_BACKEND:-AIS_MT}" = "POSIX" ] || [ "$$AIC_L2_BACKEND" = "nixl_posix" ]; then
           # NIXL first-class POSIX plugin (cpu staging buffer, no hipFileBufRegister).
           # Use for nodes where GPUDirect P2PDMA is unavailable (e.g. XFS LVM).
@@ -239,7 +260,8 @@ services:
             --max-gpu-workers "$${LMCACHE_MAX_GPU_WORKERS:-1}" \
             --l2-prefetch-max-in-flight "$${LMCACHE_L2_PREFETCH_MAX_IN_FLIGHT:-4}" \
             --worker-reap-timeout-seconds "$${LMCACHE_WORKER_REAP_TIMEOUT:-3600}" \
-            --l2-adapter "{\"type\":\"nixl_store\",\"backend\":\"POSIX\",\"backend_params\":{\"file_path\":\"/data/nvme/lmcache\",\"use_direct_io\":\"false\",\"file_size\":\"$$LMCACHE_NIXL_POSIX_SLOT_SIZE\"},\"pool_size\":$$LMCACHE_NIXL_POSIX_POOL}"
+            --l2-adapter "{\"type\":\"nixl_store\",\"backend\":\"POSIX\",\"backend_params\":{\"file_path\":\"/data/nvme/lmcache\",\"use_direct_io\":\"false\",\"file_size\":\"$$LMCACHE_NIXL_POSIX_SLOT_SIZE\"},\"pool_size\":$$LMCACHE_NIXL_POSIX_POOL}" \
+            $$_COORD_FLAGS
         else
           # nixl AIS_MT NVMe L2a + POSIX NFS L2b.  Both are file-based nixl_store
           # backends, so both backend_params MUST include use_direct_io (LMCache
@@ -254,8 +276,15 @@ services:
             --max-gpu-workers "$${LMCACHE_MAX_GPU_WORKERS:-1}" \
             --worker-reap-timeout-seconds "$${LMCACHE_WORKER_REAP_TIMEOUT:-3600}" \
             --l2-adapter "{\"type\":\"nixl_store\",\"backend\":\"AIS_MT\",\"backend_params\":{\"file_path\":\"/data/nvme/lmcache\",\"use_direct_io\":\"$$AIC_NIXL_USE_DIRECT_IO\",\"file_size\":\"$$LMCACHE_NVME_SLOT_SIZE\"},\"pool_size\":$$LMCACHE_NVME_POOL}" \
-            --l2-adapter "{\"type\":\"nixl_store\",\"backend\":\"POSIX\",\"backend_params\":{\"file_path\":\"/data/nfs/lmcache\",\"use_direct_io\":\"false\"},\"pool_size\":$$LMCACHE_NFS_POOL}"
+            --l2-adapter "{\"type\":\"nixl_store\",\"backend\":\"POSIX\",\"backend_params\":{\"file_path\":\"/data/nfs/lmcache\",\"use_direct_io\":\"false\"},\"pool_size\":$$LMCACHE_NFS_POOL}" \
+            $$_COORD_FLAGS
         fi
+    depends_on:
+      lmcache-coordinator:
+        condition: service_healthy
+        # required:false so standalone runs (LMCACHE_COORDINATOR_URL unset) don't
+        # block if the coordinator is somehow skipped from the active profile.
+        required: false
     healthcheck:
       test:
         - CMD
@@ -265,6 +294,43 @@ services:
       interval: 10s
       timeout: 5s
       retries: 18
+      start_period: 30s
+
+  # ---------------------------------------------------------------------------
+  # lmcache-coordinator: LMCache MP coordinator + Prometheus exporter in one
+  # container.  Uses the same rocm-aic image as lmcache (lmcache's dep tree
+  # cannot be split from the GPU wheels at import time) but runs no GPU
+  # workloads — no devices, no mounts, no IPC namespace needed.
+  # REST API on :9300; /metrics (Prometheus) on :9301.
+  # Behind the `cache` profile alongside lmcache.
+  # ---------------------------------------------------------------------------
+  lmcache-coordinator:
+    profiles:
+      - cache
+    image: ${IMAGE_REF:-${IMAGE_NAME:-rocm-aic}:latest}
+    container_name: aic-lmcache-coordinator
+    networks: [aic]
+    restart: unless-stopped
+    environment:
+      - LMCACHE_DISABLE_BANNER=1
+      - LMCACHE_COORDINATOR_PORT=${LMCACHE_COORDINATOR_PORT:-9300}
+      - COORDINATOR_METRICS_PORT=${COORDINATOR_METRICS_PORT:-9301}
+      - LMCACHE_COORDINATOR_INSTANCE_TIMEOUT=${LMCACHE_COORDINATOR_INSTANCE_TIMEOUT:-120}
+      - LMCACHE_COORDINATOR_HEALTH_INTERVAL=${LMCACHE_COORDINATOR_HEALTH_INTERVAL:-10}
+      - LMCACHE_COORDINATOR_EVICTION_INTERVAL=${LMCACHE_COORDINATOR_EVICTION_INTERVAL:-5}
+      - LMCACHE_COORDINATOR_KEEPALIVE=${LMCACHE_COORDINATOR_KEEPALIVE:-65}
+      - LMCACHE_CHUNK_SIZE=${LMCACHE_CHUNK_SIZE:-256}
+      - TZ=${TZ:-America/Edmonton}
+    volumes:
+      - ../monitoring/scripts/lmcache_coordinator_entrypoint.py:/app/entrypoint.py:ro
+    entrypoint: ["python3", "/app/entrypoint.py"]
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - "python3 -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:${LMCACHE_COORDINATOR_PORT:-9300}/healthz', timeout=2)\""
+      interval: 10s
+      timeout: 5s
+      retries: 12
       start_period: 30s
 
   # ---------------------------------------------------------------------------
