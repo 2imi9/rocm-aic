@@ -476,7 +476,7 @@ vllm-reset-test: _check_hf_token _prep_dirs
 	    LMCACHE_L1_SIZE_GB=1 \
 	    VLLM_EXTRA_ARGS="--enforce-eager $${VLLM_EXTRA_ARGS}" \
 	    AIC_L2_BACKEND=nixl_posix \
-	    $(COMPOSE_CACHE) --profile monitoring up -d
+	    $(COMPOSE_CACHE) --profile monitoring up -d --no-recreate
 	@echo "Waiting for vLLM to be healthy..."
 	@for i in $$(seq 1 60); do \
 	    r=$$(docker exec aic-client curl -s -o /dev/null -w '%{http_code}' \

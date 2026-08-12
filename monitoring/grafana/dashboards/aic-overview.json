@@ -2125,7 +2125,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "rate(rdma_port_data_received_bytes_total[$__rate_interval])",
+          "expr": "rate(rdma_port_rcv_data_total[$__rate_interval])",
           "legendFormat": "RX {{device}} p{{port}}"
         },
         {
@@ -2133,7 +2133,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "rate(rdma_port_data_transmitted_bytes_total[$__rate_interval])",
+          "expr": "rate(rdma_port_xmit_data_total[$__rate_interval])",
           "legendFormat": "TX {{device}} p{{port}}"
         }
       ],
@@ -3205,7 +3205,7 @@
         "type": "prometheus",
         "uid": "${datasource}"
       },
-      "description": "Requests per second to the LMCache FastAPI HTTP server by handler and status. /v1/chat/completions is the main vLLM\u2192LMCache path; /health is the readiness probe. A drop in 2xx rates or appearance of 4xx/5xx indicates the LMCache server is unhealthy.",
+      "description": "Rates of LMCache internal operations. prefetch requests = cache lookup operations initiated by vLLM; L2 store submitted = KV chunks being written to NVMe; L2 load submitted = NVMe prefetch reads back to L1.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -3226,7 +3226,7 @@
         "y": 152
       },
       "id": 93,
-      "title": "LMCache HTTP API Request Rate",
+      "title": "LMCache Operation Rate",
       "options": {
         "tooltip": {
           "mode": "multi"
@@ -3238,8 +3238,27 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "sum by (handler, status) (rate(http_requests_total[$__rate_interval]))",
-          "legendFormat": "{{handler}} {{status}}"
+          "expr": "sum(rate(lmcache_mp_prefetch_requests_total{job=\"lmcache\"}[$__rate_interval]))",
+          "legendFormat": "prefetch lookups/s",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "sum(rate(lmcache_mp_l2_store_submitted_requests_total{job=\"lmcache\"}[$__rate_interval]))",
+          "legendFormat": "L2 store submitted/s",
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "sum(rate(lmcache_mp_l2_prefetch_load_submitted_requests_total{job=\"lmcache\"}[$__rate_interval]))",
+          "legendFormat": "L2 load submitted/s",
+          "refId": "C"
         }
       ],
       "type": "timeseries"
@@ -3249,7 +3268,7 @@
         "type": "prometheus",
         "uid": "${datasource}"
       },
-      "description": "FastAPI request duration p50 and p95 per handler. High latency on /v1/chat/completions indicates LMCache is a bottleneck in the inference path \u2014 investigate L1 lookup time, L2 prefetch latency, or NIXL queue depth.",
+      "description": "Throughput of KV tensor transfers between GPU (L0) and DRAM (L1). Store: GPU\u2192DRAM (KV written to lmcache L1 after prefill). Load: DRAM\u2192GPU (KV retrieved from L1 for reuse). Source: lmcache_mp_l0_l1_store/load_throughput_GB_per_second histograms.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -3259,7 +3278,7 @@
             "lineWidth": 1,
             "fillOpacity": 10
           },
-          "unit": "s"
+          "unit": "Bps"
         },
         "overrides": []
       },
@@ -3270,7 +3289,7 @@
         "y": 152
       },
       "id": 94,
-      "title": "LMCache HTTP API Latency p50 / p95 (s)",
+      "title": "LMCache L0\u2192L1 Throughput (GB/s)",
       "options": {
         "tooltip": {
           "mode": "multi"
@@ -3282,16 +3301,18 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "histogram_quantile(0.5, sum by (handler, le) (rate(http_request_duration_seconds_bucket[$__rate_interval])))",
-          "legendFormat": "p50 {{handler}}"
+          "expr": "histogram_quantile(0.5, sum by (le) (rate(lmcache_mp_l0_l1_store_throughput_GB_per_second_bucket{job=\"lmcache\"}[$__rate_interval])))",
+          "legendFormat": "store p50 (GB/s)",
+          "refId": "A"
         },
         {
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "histogram_quantile(0.95, sum by (handler, le) (rate(http_request_duration_seconds_bucket[$__rate_interval])))",
-          "legendFormat": "p95 {{handler}}"
+          "expr": "histogram_quantile(0.5, sum by (le) (rate(lmcache_mp_l0_l1_load_throughput_GB_per_second_bucket{job=\"lmcache\"}[$__rate_interval])))",
+          "legendFormat": "load p50 (GB/s)",
+          "refId": "B"
         }
       ],
       "type": "timeseries"
@@ -4488,7 +4509,7 @@
         "type": "prometheus",
         "uid": "${datasource}"
       },
-      "description": "L2 byte usage tracked by the coordinator per cache_salt. The coordinator tracks this from event-stream STORE/DELETE events; limits are set via PUT /quota/{cache_salt}.",
+      "description": "KV chunk keys tracked in the coordinator key directory. Keys (any placement): unique chunks with at least one placement. Placements total: sum across all instances and backends \u2014 a key held by two servers counts twice. L1 keys: L1-only subset per instance, for comparison against total directory coverage.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -4498,7 +4519,7 @@
             "lineWidth": 2,
             "fillOpacity": 10
           },
-          "unit": "bytes"
+          "unit": "short"
         },
         "overrides": []
       },
@@ -4525,8 +4546,8 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "lmcache_coordinator_quota_usage_bytes_total{job=\"lmcache_coordinator\"}",
-          "legendFormat": "total L2 usage",
+          "expr": "lmcache_coordinator_directory_keys_total{job=\"lmcache_coordinator\"}",
+          "legendFormat": "keys (any placement)",
           "refId": "A"
         },
         {
@@ -4534,8 +4555,8 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "lmcache_coordinator_quota_usage_bytes{job=\"lmcache_coordinator\"}",
-          "legendFormat": "{{cache_salt}}",
+          "expr": "lmcache_coordinator_directory_placements_total{job=\"lmcache_coordinator\"}",
+          "legendFormat": "placements total",
           "refId": "B"
         },
         {
@@ -4543,12 +4564,12 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "lmcache_coordinator_quota_limit_bytes{job=\"lmcache_coordinator\"} > 0",
-          "legendFormat": "limit {{cache_salt}}",
+          "expr": "lmcache_coordinator_instance_l1_keys{job=\"lmcache_coordinator\"}",
+          "legendFormat": "L1 keys {{instance_id}}",
           "refId": "C"
         }
       ],
-      "title": "L2 Usage per Cache Salt (bytes)",
+      "title": "Coordinator Key Directory",
       "type": "timeseries"
     },
     {
@@ -4598,6 +4619,288 @@
         }
       ],
       "title": "Coordinator Exporter Scrape Latency (s)",
+      "type": "timeseries"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 191
+      },
+      "id": 408,
+      "title": "LMCache \u2014 Adapter & Transport Health",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "description": "Active vs draining L2 store/prefetch adapters. An adapter enters 'draining' when lmcache shuts down or a NIXL init error forces the adapter offline. Sustained draining=1 with active=0 indicates a nixl_posix pool init failure (e.g. stale pool files from a previous run).",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 15
+          },
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "store active"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "green",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "store draining"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "red",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "prefetch active"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "blue",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "prefetch draining"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "orange",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 0,
+        "y": 192
+      },
+      "id": 409,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "lmcache_mp_l2_store_adapters{job=\"lmcache\",state=\"active\"}",
+          "legendFormat": "store active",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "lmcache_mp_l2_store_adapters{job=\"lmcache\",state=\"draining\"}",
+          "legendFormat": "store draining",
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "lmcache_mp_l2_prefetch_adapters{job=\"lmcache\",state=\"active\"}",
+          "legendFormat": "prefetch active",
+          "refId": "C"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "lmcache_mp_l2_prefetch_adapters{job=\"lmcache\",state=\"draining\"}",
+          "legendFormat": "prefetch draining",
+          "refId": "D"
+        }
+      ],
+      "title": "L2 Adapter State (active vs draining)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "description": "Average NIXL transfer latency per request = agent_xfer_time_total / agent_tx_requests_num_total. agent_xfer_time_total is in microseconds (Start-to-Complete per request). High values indicate NVMe saturation or NIXL registration overhead.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10
+          },
+          "unit": "\u00b5s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 8,
+        "y": 192
+      },
+      "id": 410,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "single"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "rate(agent_xfer_time_total{job=\"nixl\"}[$__rate_interval]) / rate(agent_tx_requests_num_total{job=\"nixl\"}[$__rate_interval])",
+          "legendFormat": "avg xfer latency (\u00b5s/req)",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "rate(agent_xfer_post_time_total{job=\"nixl\"}[$__rate_interval]) / rate(agent_tx_requests_num_total{job=\"nixl\"}[$__rate_interval])",
+          "legendFormat": "avg post-to-backend latency (\u00b5s/req)",
+          "refId": "B"
+        }
+      ],
+      "title": "NIXL Average Transfer Latency (\u00b5s/req)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "description": "L1 allocation failures (lmcache_mp_l1_allocation_failure_total) indicate L1 is full and chunks are being dropped rather than stored \u2014 increase L1 size. Eviction loop triggered (lmcache_mp_l1_eviction_loop_triggered_total) shows when LRU eviction fires above the watermark.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10
+          },
+          "unit": "ops"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "L1 alloc failures/s"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "red",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 16,
+        "y": 192
+      },
+      "id": 411,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "sum(rate(lmcache_mp_l1_allocation_failure_chunks_total{job=\"lmcache\"}[$__rate_interval]))",
+          "legendFormat": "L1 alloc failures/s",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "sum(rate(lmcache_mp_l1_eviction_loop_triggered_total{job=\"lmcache\"}[$__rate_interval]))",
+          "legendFormat": "eviction triggered/s",
+          "refId": "B"
+        }
+      ],
+      "title": "L1 Allocation Failures & Eviction Triggers (rate)",
       "type": "timeseries"
     }
   ],
