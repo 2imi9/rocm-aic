@@ -8,7 +8,7 @@
 # Mooncake ROCm package.  Every gate exits non-zero on failure, so a failing
 # gate stops the image build.
 #
-# Run twice by the build: `wheel` before anything is installed (archive
+# Run twice by the build: `wheels` before anything is installed (archive
 # membership cannot be faked by an install), `runtime` after the install.
 # The script is kept in the image so the same gates can be re-run against a
 # built image without rebuilding:
@@ -17,7 +17,7 @@
 #       /usr/local/bin/aic-mooncake-gates.sh runtime
 #
 # Usage:
-#   aic-mooncake-gates.sh wheel <wheel-path>
+#   aic-mooncake-gates.sh wheels <lmcache-wheel> <mooncake-wheel>
 #   aic-mooncake-gates.sh runtime
 set -euo pipefail
 
@@ -29,36 +29,50 @@ die() {
 }
 
 # --- wheel archive membership (must run BEFORE the wheel is installed) -------
-gate_wheel() {
-	local wheel="${1:-}"
-	[[ -n "${wheel}" ]] || die "usage: $0 wheel <wheel-path>"
-	[[ -f "${wheel}" ]] || die "wheel not found: ${wheel}"
-	python3 - "${wheel}" <<'PY'
+# Validate both archives before either can be masked by an installed package.
+gate_wheels() {
+	local lmcache_wheel="${1:-}"
+	local mooncake_wheel="${2:-}"
+	[[ -f "${lmcache_wheel}" ]] || die "LMCache wheel not found: ${lmcache_wheel}"
+	[[ -f "${mooncake_wheel}" ]] || die "Mooncake wheel not found: ${mooncake_wheel}"
+	python3 - "${lmcache_wheel}" "${mooncake_wheel}" <<'PY'
 import sys
 import zipfile
 
-wheel = sys.argv[1]
-names = zipfile.ZipFile(wheel).namelist()
-wanted = ("lmcache/c_ops", "lmcache/lmcache_mooncake")
-missing = [
-    prefix
-    for prefix in wanted
-    if not any(n.startswith(prefix) and n.endswith(".so") for n in names)
-]
-for name in sorted(n for n in names if n.endswith(".so")):
-    print("  member: %s" % name)
-if missing:
-    raise SystemExit(
-        "ERROR: %s is missing: %s" % (wheel, ", ".join(missing))
-    )
+lmcache_wheel, mooncake_wheel = sys.argv[1:]
+
+def members(path):
+    with zipfile.ZipFile(path) as archive:
+        return archive.namelist()
+
+lmcache = members(lmcache_wheel)
+for prefix in ("lmcache/c_ops", "lmcache/lmcache_mooncake"):
+    if not any(name.startswith(prefix) and name.endswith(".so") for name in lmcache):
+        raise SystemExit("ERROR: %s is missing %s*.so" % (lmcache_wheel, prefix))
+
+mooncake = members(mooncake_wheel)
+for name in ("mooncake/engine.so", "mooncake/store.so", "mooncake/mooncake_master"):
+    if name not in mooncake:
+        raise SystemExit("ERROR: %s is missing %s" % (mooncake_wheel, name))
+
+print("  LMCache native members:")
+for name in sorted(name for name in lmcache if name.endswith(".so")):
+    print("    %s" % name)
+print("  Mooncake runtime members:")
+for name in ("mooncake/engine.so", "mooncake/store.so", "mooncake/mooncake_master"):
+    print("    %s" % name)
 PY
-	echo "PASS: a single wheel carries both c_ops and lmcache_mooncake"
+	echo "PASS: wheel archives contain both LMCache extensions and Mooncake runtime"
 }
 
 # --- imports ----------------------------------------------------------------
 gate_imports() {
 	python3 <<'PY'
 import importlib
+from importlib.metadata import version
+
+if version("lmcache") != "0.5.3":
+    raise SystemExit("ERROR: expected lmcache 0.5.3, got %s" % version("lmcache"))
 
 for name in (
     "lmcache.c_ops",
@@ -76,24 +90,23 @@ PY
 # lmcache_mp_connector imports its adapters from LMCache and silently falls
 # back to the copy vendored inside the serving engine when that import fails.
 # A wheel that lost its own adapters would still "work" through the fallback,
-# so pin the module identity.  The adapter module is imported directly: it is
-# the module the fallback replaces, and it does not drag the serving engine's
-# device probing into a build layer that has no GPU.
+# so import the external connector and pin the classes it actually selected.
 gate_adapter_identity() {
 	python3 <<'PY'
 import importlib
 
 module = importlib.import_module(
-    "lmcache.integration.vllm.vllm_multi_process_adapter"
+    "lmcache.integration.vllm.lmcache_mp_connector"
 )
+expected = "lmcache.integration.vllm.vllm_multi_process_adapter"
 for attr in ("LMCacheMPSchedulerAdapter", "LMCacheMPWorkerAdapter"):
     cls = getattr(module, attr, None)
     if cls is None:
         raise SystemExit("ERROR: %s missing from %s" % (attr, module.__name__))
-    if not cls.__module__.startswith("lmcache."):
+    if cls.__module__ != expected:
         raise SystemExit(
-            "ERROR: %s resolved to %s, not to an lmcache module"
-            % (attr, cls.__module__)
+            "ERROR: %s resolved to %s, expected %s"
+            % (attr, cls.__module__, expected)
         )
     print("  adapter: %s -> %s" % (attr, cls.__module__))
 PY
@@ -113,23 +126,35 @@ gate_master() {
 gate_ldd() {
 	local target
 	local status=0
+	local output
+	local targets
+	targets="$(mktemp)"
+	if ! ldd_targets >"${targets}"; then
+		rm -f "${targets}"
+		die "could not resolve the shared-object target list"
+	fi
 	while IFS= read -r target; do
 		[[ -n "${target}" ]] || continue
 		[[ -e "${target}" ]] || die "expected shared object is missing: ${target}"
-		if ldd "${target}" | grep -q "not found"; then
+		if ! output="$(ldd "${target}" 2>&1)"; then
+			echo "ldd failed for ${target}:" >&2
+			echo "${output}" >&2
+			status=1
+		elif grep -q "not found" <<<"${output}"; then
 			echo "unresolved libraries in ${target}:" >&2
-			ldd "${target}" | grep "not found" >&2
+			grep "not found" <<<"${output}" >&2
 			status=1
 		else
 			echo "  resolved: ${target}"
 		fi
-	done < <(ldd_targets)
+	done <"${targets}"
+	rm -f "${targets}"
 	[[ "${status}" -eq 0 ]] || die "unresolved shared libraries, see above"
 	echo "PASS: every checked shared object resolves its libraries"
 }
 
 ldd_targets() {
-	python3 <<'PY'
+	python3 <<'PY' || return 1
 import pathlib
 
 import lmcache
@@ -147,28 +172,33 @@ for package, patterns in (
         for match in matches:
             print(match)
 PY
+	local master
+	master="$(python3 -c 'import mooncake, pathlib; print(pathlib.Path(mooncake.__path__[0]) / "mooncake_master")')" || return 1
 	printf '%s\n' \
 		"${MOONCAKE_PREFIX}/lib/libmooncake_store.so" \
-		"${MOONCAKE_PREFIX}/lib/libtransfer_engine.so"
+		"${MOONCAKE_PREFIX}/lib/libtransfer_engine.so" \
+		"${MOONCAKE_PREFIX}/lib/libmooncake_common.so" \
+		"${MOONCAKE_PREFIX}/lib/libasio.so" \
+		"${MOONCAKE_PREFIX}/lib/libetcd_wrapper.so" \
+		"${master}"
 }
 
-# --- dependency metadata is consistent for the packages we ship -------------
-# `pip check` is environment wide.  Only findings that name lmcache or mooncake
-# are treated as failures here: unrelated pre-existing findings in this image
-# are not introduced by this packaging and must not silently gate it.
+# --- Mooncake's declared Python dependencies are satisfied -------------------
+# AIC intentionally removes CUDA-only packages such as cufile-python on ROCm,
+# although LMCache declares them unconditionally. A whole-environment
+# `pip check` therefore cannot be a valid gate here. Keep its useful signal,
+# but fail only on the distribution introduced by this change; the native
+# LMCache and Mooncake imports above cover the two extensions themselves.
 gate_pip_check() {
 	local report
 	report="$(python3 -m pip check 2>&1 || true)"
-	if [[ -n "${report}" ]]; then
-		echo "pip check output:"
-		while IFS= read -r line; do
-			echo "  ${line}"
-		done <<<"${report}"
+	if grep -Eqi '^mooncake[-_]transfer[-_]engine[-_]rocm ' <<<"${report}"; then
+		echo "Mooncake dependency check failed:" >&2
+		grep -Ei '^mooncake[-_]transfer[-_]engine[-_]rocm ' <<<"${report}" >&2
+		die "Mooncake package metadata is inconsistent"
 	fi
-	if echo "${report}" | grep -Eqi 'lmcache|mooncake'; then
-		die "pip check reports a problem with an lmcache or mooncake package"
-	fi
-	echo "PASS: pip check reports no lmcache or mooncake dependency problem"
+	python3 -c 'import msgpack; from importlib.metadata import version; print("  dependency: msgpack " + version("msgpack"))'
+	echo "PASS: Mooncake's declared Python dependencies are installed"
 }
 
 gate_runtime() {
@@ -184,9 +214,9 @@ main() {
 	local command="${1:-}"
 	shift || true
 	case "${command}" in
-	wheel) gate_wheel "$@" ;;
+	wheels) gate_wheels "$@" ;;
 	runtime) gate_runtime ;;
-	*) die "usage: $0 {wheel <wheel-path>|runtime}" ;;
+	*) die "usage: $0 {wheels <lmcache-wheel> <mooncake-wheel>|runtime}" ;;
 	esac
 }
 
