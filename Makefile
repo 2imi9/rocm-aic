@@ -470,13 +470,13 @@ venv:
 	@echo "Activate: source $(REPO_ROOT)/.venv/bin/activate"
 
 vllm-reset-test: _check_hf_token _prep_dirs
-	@echo "Starting LMCache L1+L2 retrieval test with small L1 (1 GiB) + NIXL POSIX L2..."
+	@echo "Starting LMCache L1+L2 retrieval test (L1=$(LMCACHE_L1_SIZE_GB)GiB) + NIXL POSIX L2..."
 	@mkdir -p "$(AIC_METRICS_DIR)"
 	PROM_UID="$$(id -u)" PROM_GID="$$(id -g)" \
-	    LMCACHE_L1_SIZE_GB=1 \
+	    LMCACHE_L1_SIZE_GB=$(LMCACHE_L1_SIZE_GB) \
 	    VLLM_EXTRA_ARGS="--enforce-eager $${VLLM_EXTRA_ARGS}" \
-	    AIC_L2_BACKEND=nixl_posix \
-	    $(COMPOSE_CACHE) --profile monitoring up -d --no-recreate
+	    AIC_L2_BACKEND=$(AIC_L2_BACKEND) \
+	    $(COMPOSE_CACHE) --profile monitoring up -d
 	@echo "Waiting for vLLM to be healthy..."
 	@for i in $$(seq 1 60); do \
 	    r=$$(docker exec aic-client curl -s -o /dev/null -w '%{http_code}' \
