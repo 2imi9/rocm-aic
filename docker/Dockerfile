@@ -66,6 +66,8 @@ ARG ROCM_BASE_IMAGE=rocm/dev-ubuntu-24.04:${ROCM_VERSION}-full
 # below follows that revision's own ROCm recipe.
 ARG MOONCAKE_GIT_URL=https://github.com/kvcache-ai/Mooncake.git
 ARG MOONCAKE_REF=df508641d76be20803349bf715d3bfc5205a7b58b
+ARG GO_VERSION=1.25.9
+ARG GO_AMD64_SHA256=00859d7bd6defe8bf84d9db9e57b9a4467b2887c18cd93ae7460e713db774bc1
 # Staged SDK (headers + shared libraries + tools) consumed by the LMCache
 # Mooncake extension.  Deliberately NOT a default compiler/linker search path:
 # see the NIXL isolation probe in stage 6.
@@ -85,6 +87,8 @@ SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 ARG MOONCAKE_GIT_URL
 ARG MOONCAKE_REF
 ARG MOONCAKE_PREFIX
+ARG GO_VERSION
+ARG GO_AMD64_SHA256
 ARG BUILD_JOBS=
 # The image's system interpreter.  Upstream's wheel script invokes
 # `python${MOONCAKE_PYTHON_VERSION}` by name.
@@ -103,6 +107,7 @@ RUN --mount=type=secret,id=tls_cert,required=false \
 RUN apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         ca-certificates \
+        curl \
         git \
         python3-pip \
     && rm -rf /var/lib/apt/lists/*
@@ -113,6 +118,20 @@ RUN rm -f /usr/lib/python3.*/EXTERNALLY-MANAGED
 ENV PIP_ROOT_USER_ACTION=ignore
 
 RUN git config --global advice.detachedHead false
+
+# Mooncake's dependency helper downloads Go from several mirrors without
+# verifying the archive. Install its expected version from go.dev first and
+# verify the official checksum; dependencies.sh then detects it and skips its
+# own downloader.
+RUN curl -fsSLo /tmp/go.tar.gz \
+        "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz" && \
+    echo "${GO_AMD64_SHA256}  /tmp/go.tar.gz" | sha256sum -c - && \
+    rm -rf /usr/local/go && \
+    tar -C /usr/local -xzf /tmp/go.tar.gz && \
+    rm -f /tmp/go.tar.gz && \
+    test "$(/usr/local/go/bin/go version | awk '{print $3}')" = "go${GO_VERSION}"
+
+ENV PATH=/usr/local/go/bin:/opt/rocm/bin:${PATH}
 
 # Pin by full commit SHA and verify it: a moved tag or a rewritten branch must
 # fail the build rather than silently ship a different Mooncake.
@@ -157,8 +176,12 @@ RUN --mount=type=cache,target=/root/.cache/go-build,sharing=locked \
         -DUSE_HTTP=ON \
         -DUSE_ETCD=ON \
         -DSTORE_USE_ETCD=ON \
+        -DWITH_STORE_RUST=OFF \
         -DBUILD_UNIT_TESTS=OFF \
+        -DBUILD_BENCHMARK=OFF \
+        -DBUILD_EXAMPLES=ON \
         -DBUILD_SHARED_LIBS=ON \
+        -DENABLE_SCCACHE=OFF \
         -DCMAKE_INSTALL_PREFIX="${MOONCAKE_PREFIX}" \
         -DPython3_EXECUTABLE="${python_bin}" && \
     attempt=0 && \
@@ -541,18 +564,23 @@ RUN --mount=type=cache,target=/root/.cache/pip \
         CMAKE_BUILD_PARALLEL_LEVEL="${BUILD_JOBS:-$(nproc)}" \
         python3 -m pip wheel --no-build-isolation --no-deps -w /wheels .
 
-# Fail-closed gates.  The archive check runs BEFORE the install, so a wheel
-# that lost either extension cannot be papered over by whatever is already in
-# site-packages; the runtime gates then re-prove it from a fresh install.
+# Fail-closed gates. Archive checks run BEFORE install, so missing extensions
+# or tools cannot be papered over by stale site-packages; runtime gates then
+# re-prove the exact installed artifacts.
 COPY docker/scripts/mooncake-gates.sh /usr/local/bin/aic-mooncake-gates.sh
+# Arrays are bash, and SHELL above is bash: the count assertions below make
+# "exactly one wheel" a build failure instead of a silent multi-arg call.
+# hadolint ignore=SC3054
 RUN chmod +x /usr/local/bin/aic-mooncake-gates.sh && \
-    env MOONCAKE_PREFIX="${MOONCAKE_PREFIX}" \
-        /usr/local/bin/aic-mooncake-gates.sh wheel "$(ls /wheels/lmcache-*.whl)"
+    shopt -s nullglob && \
+    lmcache_wheels=(/wheels/lmcache-*.whl) && \
+    mooncake_wheels=(/wheels/mooncake_transfer_engine_rocm-*.whl) && \
+    [ "${#lmcache_wheels[@]}" -eq 1 ] && \
+    [ "${#mooncake_wheels[@]}" -eq 1 ] && \
+    /usr/local/bin/aic-mooncake-gates.sh wheels \
+        "${lmcache_wheels[0]}" "${mooncake_wheels[0]}"
 
-RUN uv pip install --system --no-cache --reinstall /wheels/lmcache-*.whl && \
-    env LD_LIBRARY_PATH="${MOONCAKE_PREFIX}/lib:/opt/rocm/lib" \
-        MOONCAKE_PREFIX="${MOONCAKE_PREFIX}" \
-        /usr/local/bin/aic-mooncake-gates.sh runtime
+RUN uv pip install --system --no-cache --reinstall /wheels/lmcache-*.whl
 
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system "matplotlib>=3.8,<4"
@@ -569,29 +597,9 @@ RUN uv pip uninstall --system \
 # and ais-check are all pre-installed in rocm/dev-ubuntu-24.04:${ROCM_VERSION}-full.
 
 # ----- 6. NIXL (ai-dynamo/nixl upstream + nixl-rocm-ais-mt.patch) ------------
-# NIXL enables its own Mooncake backend by auto-detection, not by a flag: its
-# plugin list is opt-out, and src/plugins/meson.build enables the plugin when
-# the C++ compiler can resolve -ltransfer_engine.  Installing Mooncake could
-# therefore change what NIXL builds and installs without any change to the
-# meson arguments, which stay exactly as they were.
-#
-# The SDK is staged under a prefix that is not on the compiler's default link
-# path, and nothing here exports LIBRARY_PATH, CPATH or PKG_CONFIG_PATH for it,
-# so the detection stays negative.  Prove that instead of asserting it: this
-# probe is the same link test meson performs, and it fails the build if
-# -ltransfer_engine ever starts resolving.  The matching post-build check below
-# fails if a Mooncake plugin appears anyway.
-RUN printf 'int main() { return 0; }\n' > /tmp/nixl-mooncake-probe.cpp && \
-    if g++ /tmp/nixl-mooncake-probe.cpp -ltransfer_engine \
-            -o /tmp/nixl-mooncake-probe 2>/dev/null; then \
-        echo "ERROR: -ltransfer_engine resolves on the default link path;" >&2; \
-        echo "       NIXL would auto-enable its Mooncake plugin and change" >&2; \
-        echo "       the shipped plugin set. Keep the Mooncake SDK off the" >&2; \
-        echo "       default compiler search path." >&2; \
-        exit 1; \
-    fi && \
-    rm -f /tmp/nixl-mooncake-probe.cpp /tmp/nixl-mooncake-probe && \
-    echo "PASS: transfer_engine is not on the default link path; NIXL plugin set unchanged"
+# NIXL has a separate preview Mooncake plugin. This image deliberately owns
+# Mooncake through LMCache, so build-nixl.sh disables that plugin explicitly;
+# the post-build check below verifies it stayed absent.
 
 # Clone upstream ai-dynamo/nixl, then apply nixl-rocm-ais-mt.patch to add ROCm/HIP
 # detection and the AIS_MT plugin tree.
@@ -622,7 +630,8 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         AIC_UCX_FAST="${AIC_UCX_FAST}" \
         UV_SYSTEM_CERTS=1 \
         /tmp/nixl-scripts/build-nixl.sh && \
-    mooncake_plugin="$(find /opt/nixl /tmp/nixl/build -iname '*mooncake*' 2>/dev/null || true)" && \
+    mooncake_plugin="$(find /opt/nixl /tmp/nixl/build -type f \
+        -iname '*mooncake*.so*' 2>/dev/null || true)" && \
     if [ -n "${mooncake_plugin}" ]; then \
         echo "ERROR: NIXL built or installed a Mooncake plugin: ${mooncake_plugin}" >&2; \
         exit 1; \
@@ -673,6 +682,11 @@ ENV PYTHONUNBUFFERED=1 \
     HSA_ENABLE_IPC_MODE_LEGACY=1 \
     SAFETENSORS_FAST_GPU=1 \
     HIP_FORCE_DEV_KERNARG=1
+
+# Prove the installed artifacts in the final package and loader environment,
+# after the intentional CUDA-package cleanup and the source NIXL install.
+RUN MOONCAKE_PREFIX="${MOONCAKE_PREFIX}" \
+    /usr/local/bin/aic-mooncake-gates.sh runtime
 
 # Provide image metadata. AIC_VERSION is declared and used here — after all
 # expensive build steps — so version bumps only invalidate this single cheap
