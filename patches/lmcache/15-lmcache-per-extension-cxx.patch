@@ -220,32 +220,38 @@ index 13f0d8e..061e5be 100644
 +++ b/setup_extensions/build_profiles/rocm.py
 @@ -2,25 +2,47 @@
  """ROCm/HIP GPU backend profile.
- 
+-
++
  Hipifies CUDA sources via ``torch.utils.hipify``, then builds
 -``lmcache.c_ops`` with hipcc as the C++ compiler.
 +``lmcache.c_ops`` with hipcc as the C++ compiler.  hipcc is selected for that
 +one extension only (see ``setup_extensions/build_ext.py``); the common C++
 +extensions and the optional host-only storage backends keep the base compiler.
  """
- 
+-
++
  # Standard
  from pathlib import Path
  from typing import TYPE_CHECKING, Optional
  import os
 +import shutil
- 
+-
++
  if TYPE_CHECKING:
      # Third Party
      from setuptools.extension import Extension
- 
+-
++
  # First Party
 +from setup_extensions.build_ext import CXX_ATTR, lmcache_build_extension
  from setup_extensions.build_profiles import BuildProfile
- 
+-
++
  ROOT_DIR = Path(__file__).parent.parent.parent
  HIPIFY_DIR = os.path.join(ROOT_DIR, "csrc/")
  HIPIFY_OUT_DIR = os.path.join(ROOT_DIR, "csrc_hip/")
- 
+-
++
 +#: Environment override for the compiler that builds ``lmcache.c_ops``.
 +ROCM_CXX_ENV = "LMCACHE_ROCM_CXX"
 +
@@ -264,7 +270,8 @@ index 13f0d8e..061e5be 100644
 +        return found
 +    return os.path.join(os.environ.get("ROCM_PATH", "/opt/rocm"), "bin", "hipcc")
 +
- 
+-
++
  def _hipify_wrapper() -> list[str]:
      """Run torch hipify on csrc/ and return hipified source paths."""
 @@ -99,26 +121,29 @@ class RocmProfile(BuildProfile):
@@ -314,7 +321,8 @@ index 13f0d8e..061e5be 100644
 +        ext_modules = [c_ops]
 +        cmdclass = {"build_ext": lmcache_build_extension()}
          return ext_modules, cmdclass
- 
+-
++
      def requirements_file(self) -> Optional[str]:
 diff --git a/tests/setup_extensions/test_build_ext.py b/tests/setup_extensions/test_build_ext.py
 new file mode 100644
