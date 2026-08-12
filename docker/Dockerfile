@@ -65,7 +65,8 @@ ARG ROCM_BASE_IMAGE=rocm/dev-ubuntu-24.04:${ROCM_VERSION}-full
 # upstream ROCm/HIP wheel + CI recipe).  Bump only with evidence: the build
 # below follows that revision's own ROCm recipe.
 ARG MOONCAKE_GIT_URL=https://github.com/kvcache-ai/Mooncake.git
-ARG MOONCAKE_REF=df508641d76be20803349bf715d3bfc5205a7b58b
+ARG MOONCAKE_REF=e164c96b3c184b34f7979c47c176c2e51a926f66
+ARG MOONCAKE_FETCH_REF=refs/pull/3184/head
 ARG GO_VERSION=1.25.9
 ARG GO_AMD64_SHA256=00859d7bd6defe8bf84d9db9e57b9a4467b2887c18cd93ae7460e713db774bc1
 # Staged SDK (headers + shared libraries + tools) consumed by the LMCache
@@ -86,6 +87,7 @@ SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 ARG MOONCAKE_GIT_URL
 ARG MOONCAKE_REF
+ARG MOONCAKE_FETCH_REF
 ARG MOONCAKE_PREFIX
 ARG GO_VERSION
 ARG GO_AMD64_SHA256
@@ -137,7 +139,8 @@ ENV PATH=/usr/local/go/bin:/opt/rocm/bin:${PATH}
 # fail the build rather than silently ship a different Mooncake.
 RUN git init /src/Mooncake && \
     git -C /src/Mooncake remote add origin "${MOONCAKE_GIT_URL}" && \
-    git -C /src/Mooncake fetch --depth 1 origin "${MOONCAKE_REF}" && \
+    git -C /src/Mooncake fetch --filter=blob:none --depth 1 \
+        origin "${MOONCAKE_FETCH_REF}" && \
     git -C /src/Mooncake checkout --detach FETCH_HEAD && \
     test "$(git -C /src/Mooncake rev-parse HEAD)" = "${MOONCAKE_REF}" \
         || { echo "ERROR: Mooncake checkout is not ${MOONCAKE_REF}" >&2; exit 1; }
