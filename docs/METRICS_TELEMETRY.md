@@ -225,7 +225,7 @@ LMCache uses OpenTelemetry with a Prometheus fallback at `--http-port`
 | `lmcache_mp_l2_store_completed_requests_total` | counter | *lazy* L2 store requests completed; `l2_name` label |
 | `lmcache_mp_l2_store_completed_objects_chunks_total` | counter | *lazy* Chunks successfully stored to L2 |
 | `lmcache_mp_l2_store_throughput_GB_per_second` | histogram | *lazy* L2 store throughput (GB/s); `l2_name` label |
-| `lmcache_mp_l2_evicted_objects` | counter | *lazy* Objects evicted from L2 |
+| `lmcache_mp_l2_evicted_objects_chunks_total` | counter | *lazy* Chunks evicted from L2 |
 | `lmcache_mp_num_inflight_l2_stores` | gauge | In-flight L2 store operations; `adapter_index`+`l2_name` labels |
 | `lmcache_mp_num_inflight_l2_loads` | gauge | In-flight L2 load operations |
 
