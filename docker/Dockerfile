@@ -9,6 +9,11 @@
 #   LMCache:    LMCache/LMCache ${LMCACHE_REF} + AMD patches from patches/lmcache/
 #   hipFile:    included in the ROCm 7.14 base image (GA since 7.14) — no source build needed
 #   NIXL:       ai-dynamo/nixl ${NIXL_REF} + nixl-rocm-ais-mt.patch (ROCm/HIP + AIS_MT)
+#   Mooncake:   kvcache-ai/Mooncake built from source at the pinned ${MOONCAKE_REF}
+#               in its own stage; the staged SDK is what LMCache's optional
+#               Mooncake L2 backend compiles and links against, and the ROCm
+#               wheel from upstream's own build script is installed alongside.
+#               Packaging only: no runtime service, option or default changes.
 #
 # Two compose services share this single image:
 #   lmcache — standalone lmcache-server (MP mode)
@@ -41,7 +46,8 @@
 # the NN- prefixes.  Drop a new NN-*.patch into the directory to include it.
 #
 # Wheels: the build also produces pip-installable wheels for vLLM (source-built),
-# the patched LMCache, and ROCm NIXL under /wheels.  Extract them with the `wheels` stage:
+# the patched LMCache, source-built Mooncake (ROCm) and ROCm NIXL under /wheels.
+# Extract them with the `wheels` stage:
 #   docker build --build-arg AIC_VERSION="$(<VERSION)" \
 #     --target wheels --output type=local,dest=./wheels .
 # (the default target remains the full runtime image -- see stages 8/9 below).
@@ -54,6 +60,170 @@
 ARG ROCM_VERSION=7.14.0
 # ROCm 7.14 publishes the hipFile-bearing variant as `-full` (not `-complete`).
 ARG ROCM_BASE_IMAGE=rocm/dev-ubuntu-24.04:${ROCM_VERSION}-full
+
+# Mooncake: source-built at an exact commit (the first revision carrying the
+# upstream ROCm/HIP wheel + CI recipe).  Bump only with evidence: the build
+# below follows that revision's own ROCm recipe.
+ARG MOONCAKE_GIT_URL=https://github.com/kvcache-ai/Mooncake.git
+ARG MOONCAKE_REF=df508641d76be20803349bf715d3bfc5205a7b58b
+# Staged SDK (headers + shared libraries + tools) consumed by the LMCache
+# Mooncake extension.  Deliberately NOT a default compiler/linker search path:
+# see the NIXL isolation probe in stage 6.
+ARG MOONCAKE_PREFIX=/opt/mooncake-sdk
+
+# ----- Stage M. Mooncake (source build at the pinned commit) -----------------
+# Independent builder on the same ROCm base.  Only ${MOONCAKE_PREFIX} and the
+# built wheel cross into the main stage, so this stage's system-wide side
+# effects (Go toolchain, yalantinglibs in /usr/local, the CMake install of the
+# mooncake python package into site-packages) never reach the runtime image.
+#
+# hadolint ignore=DL3006
+FROM ${ROCM_BASE_IMAGE} AS mooncake-build
+
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
+ARG MOONCAKE_GIT_URL
+ARG MOONCAKE_REF
+ARG MOONCAKE_PREFIX
+ARG BUILD_JOBS=
+# The image's system interpreter.  Upstream's wheel script invokes
+# `python${MOONCAKE_PYTHON_VERSION}` by name.
+ARG MOONCAKE_PYTHON_VERSION=3.12
+
+# Corporate CA, same contract as the main stage: mounted for this layer only.
+RUN --mount=type=secret,id=tls_cert,required=false \
+    if [ -f /run/secrets/tls_cert ] && [ -s /run/secrets/tls_cert ]; then \
+        cp /run/secrets/tls_cert /usr/local/share/ca-certificates/corp-ca.crt && \
+        update-ca-certificates; \
+    fi
+
+# git must exist before the clone, and pip must be importable before upstream's
+# wheel script bootstraps its build frontend.  Everything else is installed by
+# Mooncake's own dependencies.sh below.
+RUN apt-get update && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        ca-certificates \
+        git \
+        python3-pip \
+    && rm -rf /var/lib/apt/lists/*
+
+# Ubuntu 24.04 marks the system interpreter PEP-668 "externally managed"; this
+# throwaway builder installs its build frontend into it.
+RUN rm -f /usr/lib/python3.*/EXTERNALLY-MANAGED
+ENV PIP_ROOT_USER_ACTION=ignore
+
+RUN git config --global advice.detachedHead false
+
+# Pin by full commit SHA and verify it: a moved tag or a rewritten branch must
+# fail the build rather than silently ship a different Mooncake.
+RUN git clone --filter=blob:none "${MOONCAKE_GIT_URL}" /src/Mooncake && \
+    git -C /src/Mooncake checkout --detach "${MOONCAKE_REF}" && \
+    test "$(git -C /src/Mooncake rev-parse HEAD)" = "${MOONCAKE_REF}" \
+        || { echo "ERROR: Mooncake checkout is not ${MOONCAKE_REF}" >&2; exit 1; }
+
+# Upstream's own dependency installer: system packages, git submodules
+# (pybind11, yalantinglibs) and the yalantinglibs install into /usr/local.
+# Kept whole on purpose - it is the recipe the pinned revision builds against.
+RUN cd /src/Mooncake && bash dependencies.sh -y
+
+# Pinned build frontend for the wheel step.  Upstream's build_wheel.sh upgrades
+# pip/build/setuptools/wheel/auditwheel and then builds in an isolated env;
+# PIP_CONSTRAINT applies to both, so the frontend is pinned instead of floating.
+# Transitive dependencies of these packages still resolve at build time.
+COPY docker/constraints/mooncake-wheel-build.txt /etc/mooncake-wheel-build.txt
+ENV PIP_CONSTRAINT=/etc/mooncake-wheel-build.txt
+
+# Configure/build with the pinned revision's ROCm recipe (.github/workflows/
+# ci_rocm.yml): USE_HIP with hipify-perl from /opt/rocm/bin on PATH, no CUDA,
+# no EP, HTTP + etcd metadata, no unit tests.  Two deviations, both required
+# here and both deliberate:
+#   BUILD_SHARED_LIBS=ON  - upstream CI only produces the python wheel, whose
+#       engine.so/store.so are self-contained.  A third-party consumer
+#       (LMCache's Mooncake extension) has to link libmooncake_store.so, and
+#       the install rules for the store/transfer-engine/common libraries are
+#       guarded on this option.
+#   CMAKE_INSTALL_PREFIX  - the SDK is staged outside the default prefixes.
+# The Go etcd wrapper fetches modules from the network; upstream CI retries the
+# build for exactly that reason, so mirror the retry rather than fail a long
+# build on a transient fetch.
+RUN --mount=type=cache,target=/root/.cache/go-build,sharing=locked \
+    export PATH="/opt/rocm/bin:/usr/local/go/bin:${PATH}" && \
+    python_bin="$(command -v "python${MOONCAKE_PYTHON_VERSION}")" && \
+    cmake -G Ninja -S /src/Mooncake -B /src/Mooncake/build \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DUSE_HIP=ON \
+        -DUSE_CUDA=OFF \
+        -DWITH_EP=OFF \
+        -DUSE_HTTP=ON \
+        -DUSE_ETCD=ON \
+        -DSTORE_USE_ETCD=ON \
+        -DBUILD_UNIT_TESTS=OFF \
+        -DBUILD_SHARED_LIBS=ON \
+        -DCMAKE_INSTALL_PREFIX="${MOONCAKE_PREFIX}" \
+        -DPython3_EXECUTABLE="${python_bin}" && \
+    attempt=0 && \
+    until cmake --build /src/Mooncake/build -j "${BUILD_JOBS:-$(nproc)}"; do \
+        attempt=$((attempt + 1)); \
+        if [ "${attempt}" -ge 3 ]; then \
+            echo "ERROR: Mooncake build failed after ${attempt} attempts" >&2; exit 1; \
+        fi; \
+        echo "Mooncake build attempt ${attempt} failed, retrying"; sleep 15; \
+    done && \
+    cmake --install /src/Mooncake/build
+
+# Stage the SDK.  `cmake --install` carries the shared libraries, the
+# transfer-engine public headers and the master/client binaries, but NOT the
+# store headers, the vendored cachelib tree, the generated headers or
+# yalantinglibs - all of which a consumer of the store client compiles against.
+# Copy them explicitly, then assert the result: a silently incomplete SDK would
+# only surface as a confusing compile error one stage later.
+RUN set -eu; \
+    src=/src/Mooncake; \
+    include="${MOONCAKE_PREFIX}/include"; \
+    mkdir -p "${include}" "${MOONCAKE_PREFIX}/lib"; \
+    cp -a /usr/local/include/. "${include}/"; \
+    cp -a "${src}/mooncake-transfer-engine/include/." "${include}/"; \
+    cp -a "${src}/mooncake-common/include/." "${include}/"; \
+    cp -a "${src}/mooncake-store/include/." "${include}/"; \
+    cp -a "${src}/build/mooncake-store/include/." "${include}/"; \
+    for lib in \
+        "${src}/build/mooncake-store/src/libmooncake_store.so" \
+        "${src}/build/mooncake-common/src/libmooncake_common.so" \
+        "${src}/build/mooncake-common/libasio.so" \
+        "${src}/build/mooncake-common/etcd/libetcd_wrapper.so" \
+        "${src}/build/mooncake-transfer-engine/src/libtransfer_engine.so"; do \
+        if [ -f "${lib}" ]; then \
+            install -Dm0755 "${lib}" "${MOONCAKE_PREFIX}/lib/$(basename "${lib}")"; \
+        fi; \
+    done; \
+    for required in \
+        lib/libmooncake_store.so \
+        lib/libtransfer_engine.so \
+        include/real_client.h \
+        include/transfer_engine.h \
+        include/cachelib_memory_allocator/Slab.h \
+        include/ylt/struct_pack.hpp; do \
+        [ -e "${MOONCAKE_PREFIX}/${required}" ] || \
+            { echo "ERROR: staged SDK is missing ${required}" >&2; exit 1; }; \
+    done; \
+    echo "PASS: Mooncake SDK staged at ${MOONCAKE_PREFIX}"
+
+# Official ROCm/HIP wheel, built by upstream's own script (HIP_BUILD=1 renames
+# the distribution and auditwheel excludes the ROCm runtime, which is bound at
+# load time).  `pip` is what the script probes for.
+RUN set -eu; \
+    command -v pip >/dev/null || ln -s "$(command -v pip3)" /usr/local/bin/pip; \
+    cd /src/Mooncake; \
+    export PATH="/opt/rocm/bin:/usr/local/go/bin:${PATH}"; \
+    export LD_LIBRARY_PATH="/usr/local/lib:${LD_LIBRARY_PATH:-}"; \
+    HIP_BUILD=1 \
+        PYTHON_VERSION="${MOONCAKE_PYTHON_VERSION}" \
+        OUTPUT_DIR=dist-rocm \
+        ./scripts/build_wheel.sh; \
+    mkdir -p /wheels; \
+    cp mooncake-wheel/dist-rocm/*.whl /wheels/; \
+    ls -1 /wheels
+
 # ROCM_BASE_IMAGE has a tagged default but remains overridable by callers.
 # hadolint ignore=DL3006
 FROM ${ROCM_BASE_IMAGE} AS build
@@ -265,6 +435,43 @@ RUN --mount=type=cache,target=/root/.cache/pip \
         pip3 wheel --no-build-isolation --no-deps --no-cache-dir -w /wheels . && \
     pip3 install --no-cache-dir /wheels/vllm-*.whl
 
+# ----- 3b. Mooncake SDK + ROCm wheel (from the mooncake-build stage) ---------
+# Declared here, after the expensive torch/vLLM layers: re-pinning Mooncake
+# must not invalidate them (same reasoning as AIC_VERSION at the end).
+ARG MOONCAKE_GIT_URL
+ARG MOONCAKE_REF
+ARG MOONCAKE_PREFIX
+
+# Runtime and header dependencies of the Mooncake store client, which the
+# LMCache Mooncake extension compiles and links against in stage 4.  This is
+# the subset of Mooncake's own dependency list that its store library links or
+# that its public headers include (glog/gflags, jsoncpp, yaml-cpp, curl for the
+# HTTP metadata client, zstd, xxhash, io_uring, numa); boost, fmt, msgpack and
+# ibverbs are already installed above.
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    apt-get update && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        libcurl4-openssl-dev \
+        libgoogle-glog-dev \
+        libjsoncpp-dev \
+        libnuma-dev \
+        liburing-dev \
+        libxxhash-dev \
+        libyaml-cpp-dev \
+        libzstd-dev
+
+COPY --from=mooncake-build ${MOONCAKE_PREFIX} ${MOONCAKE_PREFIX}
+COPY --from=mooncake-build /wheels/ /wheels/
+
+# Install the source-built ROCm wheel with its declared dependencies, keeping
+# torch pinned so the resolver cannot pull a different build in.
+RUN --mount=type=cache,target=/root/.cache/uv \
+    printf 'torch==2.13.0+rocm7.2\ntorchvision==0.28.0+rocm7.2\n' > /tmp/mooncake-constraints.txt && \
+    uv pip install --system --no-cache \
+        --constraint /tmp/mooncake-constraints.txt \
+        /wheels/mooncake_transfer_engine_rocm-*.whl
+
 # ----- 4. LMCache (upstream release + AMD patches) ---------------------------
 # Shallow-clone the pinned release tag directly (no history/other branches).
 RUN git clone --depth 1 --branch "${LMCACHE_REF}" "${LMCACHE_GIT_URL}" /app/LMCache
@@ -291,9 +498,17 @@ RUN cd /app/LMCache && \
         fi; \
     done
 
-# Build the LMCache wheel (with the AMD patches + HIP extension) and install THAT,
-# instead of `pip install -e .`, so the wheel we publish is byte-for-byte what the
-# image runs.  The wheel lands in /wheels (extracted by the `wheels` stage below).
+# Build ONE LMCache wheel carrying both native extensions (the HIP c_ops and
+# the host-only Mooncake L2 backend) and install THAT, instead of
+# `pip install -e .`, so the wheel we publish is byte-for-byte what the image
+# runs.  The wheel lands in /wheels (extracted by the `wheels` stage below).
+#
+# Compilers: LMCache collects every extension into a single build_ext, so one
+# global CXX used to have to serve both the HIP sources and the host-only ones.
+# 15-lmcache-per-extension-cxx.patch makes the compiler a per-extension
+# property: the base compiler is g++, and only lmcache.c_ops is switched to
+# LMCACHE_ROCM_CXX (hipcc) for its own compile and link.  Do not reintroduce a
+# global CXX=hipcc: it would hand hipcc the Mooncake and common C++ sources.
 #
 # ROCM_TARGET_LST pins the arch that hipcc auto-detects for the host-side .cpp
 # files (which torch compiles without an explicit --offload-arch): on a GPU-less
@@ -302,21 +517,42 @@ RUN cd /app/LMCache && \
 # multi-arch set from PYTORCH_ROCM_ARCH via torch, so a single valid arch here
 # (the first of the list) is enough to satisfy the host compiles.
 # MAX_JOBS / CMAKE_BUILD_PARALLEL_LEVEL parallelize the HIP extension compile
-# (torch's build_ext is single-threaded otherwise -- the dominant build step).
-# The pip build cache is a BuildKit cache mount, so repeated builds reuse it.
+# (torch's build_ext is single-threaded otherwise -- the dominant build step);
+# they parallelize work INSIDE one extension, which the compiler switch allows.
+#
+# MOONCAKE_INCLUDE_DIR lists the same four include roots Mooncake's own CMake
+# puts on the store library's compile line (the SDK root, plus the vendored
+# cachelib allocator and its two header roots); MOONCAKE_LIB_DIR provides both
+# -L and the extension's RPATH.
 RUN --mount=type=cache,target=/root/.cache/pip \
     mkdir -p /wheels && \
     printf '%s\n' "${ROCM_ARCH%%;*}" > /etc/rocm_target.lst && \
     cd /app/LMCache && \
     PYTORCH_ROCM_ARCH="${ROCM_ARCH}" \
         TORCH_DONT_CHECK_COMPILER_ABI=1 \
-        CXX=hipcc \
+        CXX=/usr/bin/g++ \
+        LMCACHE_ROCM_CXX=/opt/rocm/bin/hipcc \
         BUILD_WITH_HIP=1 \
+        BUILD_WITH_MOONCAKE=1 \
+        MOONCAKE_INCLUDE_DIR="${MOONCAKE_PREFIX}/include;${MOONCAKE_PREFIX}/include/cachelib_memory_allocator;${MOONCAKE_PREFIX}/include/cachelib_memory_allocator/include;${MOONCAKE_PREFIX}/include/cachelib_memory_allocator/fake_include" \
+        MOONCAKE_LIB_DIR="${MOONCAKE_PREFIX}/lib" \
         ROCM_TARGET_LST=/etc/rocm_target.lst \
         MAX_JOBS="${BUILD_JOBS:-$(nproc)}" \
         CMAKE_BUILD_PARALLEL_LEVEL="${BUILD_JOBS:-$(nproc)}" \
-        python3 -m pip wheel --no-build-isolation --no-deps -w /wheels . && \
-    uv pip install --system --no-cache /wheels/lmcache-*.whl
+        python3 -m pip wheel --no-build-isolation --no-deps -w /wheels .
+
+# Fail-closed gates.  The archive check runs BEFORE the install, so a wheel
+# that lost either extension cannot be papered over by whatever is already in
+# site-packages; the runtime gates then re-prove it from a fresh install.
+COPY docker/scripts/mooncake-gates.sh /usr/local/bin/aic-mooncake-gates.sh
+RUN chmod +x /usr/local/bin/aic-mooncake-gates.sh && \
+    env MOONCAKE_PREFIX="${MOONCAKE_PREFIX}" \
+        /usr/local/bin/aic-mooncake-gates.sh wheel "$(ls /wheels/lmcache-*.whl)"
+
+RUN uv pip install --system --no-cache --reinstall /wheels/lmcache-*.whl && \
+    env LD_LIBRARY_PATH="${MOONCAKE_PREFIX}/lib:/opt/rocm/lib" \
+        MOONCAKE_PREFIX="${MOONCAKE_PREFIX}" \
+        /usr/local/bin/aic-mooncake-gates.sh runtime
 
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system "matplotlib>=3.8,<4"
@@ -333,6 +569,30 @@ RUN uv pip uninstall --system \
 # and ais-check are all pre-installed in rocm/dev-ubuntu-24.04:${ROCM_VERSION}-full.
 
 # ----- 6. NIXL (ai-dynamo/nixl upstream + nixl-rocm-ais-mt.patch) ------------
+# NIXL enables its own Mooncake backend by auto-detection, not by a flag: its
+# plugin list is opt-out, and src/plugins/meson.build enables the plugin when
+# the C++ compiler can resolve -ltransfer_engine.  Installing Mooncake could
+# therefore change what NIXL builds and installs without any change to the
+# meson arguments, which stay exactly as they were.
+#
+# The SDK is staged under a prefix that is not on the compiler's default link
+# path, and nothing here exports LIBRARY_PATH, CPATH or PKG_CONFIG_PATH for it,
+# so the detection stays negative.  Prove that instead of asserting it: this
+# probe is the same link test meson performs, and it fails the build if
+# -ltransfer_engine ever starts resolving.  The matching post-build check below
+# fails if a Mooncake plugin appears anyway.
+RUN printf 'int main() { return 0; }\n' > /tmp/nixl-mooncake-probe.cpp && \
+    if g++ /tmp/nixl-mooncake-probe.cpp -ltransfer_engine \
+            -o /tmp/nixl-mooncake-probe 2>/dev/null; then \
+        echo "ERROR: -ltransfer_engine resolves on the default link path;" >&2; \
+        echo "       NIXL would auto-enable its Mooncake plugin and change" >&2; \
+        echo "       the shipped plugin set. Keep the Mooncake SDK off the" >&2; \
+        echo "       default compiler search path." >&2; \
+        exit 1; \
+    fi && \
+    rm -f /tmp/nixl-mooncake-probe.cpp /tmp/nixl-mooncake-probe && \
+    echo "PASS: transfer_engine is not on the default link path; NIXL plugin set unchanged"
+
 # Clone upstream ai-dynamo/nixl, then apply nixl-rocm-ais-mt.patch to add ROCm/HIP
 # detection and the AIS_MT plugin tree.
 COPY docker/scripts /tmp/nixl-scripts
@@ -361,7 +621,13 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         BUILD_JOBS="${BUILD_JOBS}" \
         AIC_UCX_FAST="${AIC_UCX_FAST}" \
         UV_SYSTEM_CERTS=1 \
-        /tmp/nixl-scripts/build-nixl.sh
+        /tmp/nixl-scripts/build-nixl.sh && \
+    mooncake_plugin="$(find /opt/nixl /tmp/nixl/build -iname '*mooncake*' 2>/dev/null || true)" && \
+    if [ -n "${mooncake_plugin}" ]; then \
+        echo "ERROR: NIXL built or installed a Mooncake plugin: ${mooncake_plugin}" >&2; \
+        exit 1; \
+    fi && \
+    echo "PASS: NIXL built no Mooncake plugin; its plugin set is unchanged"
 
 # ----- 6b. hsa-snoop (HSA AQL queue snooper + Prometheus exporter) -----------
 # GPU dispatch/queue telemetry on :9488 (/metrics), including AIS (AMD Infinity
@@ -394,11 +660,16 @@ RUN git clone --depth 1 --branch "${HSA_SNOOP_REF}" "${HSA_SNOOP_GIT_URL}" /app/
 #   HSA_ENABLE_IPC_MODE_LEGACY=1  — legacy HIP IPC for cross-container KV registration (LMCache MP)
 #   SAFETENSORS_FAST_GPU=1        — GPU-accelerated weight loading, faster model startup
 #   HIP_FORCE_DEV_KERNARG=1       — kernel arg handling fix on MI300+/gfx942/gfx950
+#
+# The Mooncake entries are loader-path only: libmooncake_store.so is found by
+# the RPATH of the LMCache extension, but its own dependencies (transfer
+# engine, common, asio, etcd wrapper) are resolved through this path, and the
+# packaged python modules keep their auditwheel-bundled libraries beside them.
 ENV PYTHONUNBUFFERED=1 \
     PYTHONHASHSEED=0 \
     NIXL_PLUGIN_DIR=/opt/nixl/lib/x86_64-linux-gnu/plugins \
     PYTHONPATH=/opt/rocm/share/amd_smi:/opt/nixl/lib/python3/dist-packages \
-    LD_LIBRARY_PATH=/opt/nixl/lib/x86_64-linux-gnu:/opt/nixl/lib:/opt/rocnixl-ucx/lib:/opt/rocm/lib \
+    LD_LIBRARY_PATH=/opt/nixl/lib/x86_64-linux-gnu:/opt/nixl/lib:/opt/rocnixl-ucx/lib:/opt/rocm/lib:${MOONCAKE_PREFIX}/lib:${MOONCAKE_PREFIX}/lib64:/usr/local/lib/python3.12/dist-packages/mooncake:/usr/local/lib/python3.12/dist-packages/mooncake_transfer_engine_rocm.libs \
     HSA_ENABLE_IPC_MODE_LEGACY=1 \
     SAFETENSORS_FAST_GPU=1 \
     HIP_FORCE_DEV_KERNARG=1
@@ -418,14 +689,16 @@ LABEL org.opencontainers.image.title="rocm-aic" \
       ai.amd.aic.lmcache="${LMCACHE_REF}" \
       ai.amd.aic.nixl="${NIXL_REF}" \
       ai.amd.aic.hipfile="rocm-${ROCM_VERSION}" \
-      ai.amd.aic.hsa-snoop="${HSA_SNOOP_REF}"
+      ai.amd.aic.hsa-snoop="${HSA_SNOOP_REF}" \
+      ai.amd.aic.mooncake="${MOONCAKE_REF}" \
+      ai.amd.aic.mooncake.source="${MOONCAKE_GIT_URL}"
 
 # vLLM OpenAI-compatible server is the default entrypoint.
 ENTRYPOINT ["python3", "-m", "vllm.entrypoints.openai.api_server"]
 
 # ----- 8. Wheel export stage -------------------------------------------------
 # A scratch image whose only content is the pip wheels built above (source-built
-# vLLM + patched LMCache + ROCm NIXL).  Extract them WITHOUT building/loading
+# vLLM + patched LMCache + Mooncake ROCm + ROCm NIXL).  Extract them WITHOUT building/loading
 # the full image:
 #   docker build --build-arg AIC_VERSION="$(<VERSION)" \
 #     --target wheels --output type=local,dest=./wheels .
