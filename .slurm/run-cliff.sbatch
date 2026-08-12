@@ -794,7 +794,9 @@ run_arm_kvd() { # $1=mode(nvme|gds) $2=out_csv
   # falsely trigger recovery. Real crashes will still be detected once vLLM stops
   # responding entirely (the ZMQ channel closes cleanly on process exit).
   local _hb="${LMCACHE_HEARTBEAT_INTERVAL:-900}"
-  export KV_TRANSFER_ARG="--kv-transfer-config '{\"kv_connector\":\"LMCacheMPConnector\",\"kv_role\":\"kv_both\"${_fp},\"kv_connector_extra_config\":{\"lmcache.mp.host\":\"tcp://localhost\",\"lmcache.mp.port\":${LMCACHE_PORT},\"lmcache.mp.heartbeat_interval\":${_hb}}}'"
+  # Sharing lmcache's PID/IPC namespaces does not share its network namespace;
+  # resolve the peer through the Compose network, as the interactive stack does.
+  export KV_TRANSFER_ARG="--kv-transfer-config '{\"kv_connector\":\"LMCacheMPConnector\",\"kv_role\":\"kv_both\"${_fp},\"kv_connector_extra_config\":{\"lmcache.mp.host\":\"tcp://aic-lmcache\",\"lmcache.mp.port\":${LMCACHE_PORT},\"lmcache.mp.heartbeat_interval\":${_hb}}}'"
   export VLLM_IPC_MODE=service:lmcache # join lmcache IPC ns for cross-container HIP IPC
   export VLLM_PID_MODE=service:lmcache # share lmcache PID ns for cross-container HIP IPC
 

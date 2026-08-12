@@ -1176,7 +1176,10 @@ export LMCACHE_L1_SIZE_GB=4
 export AIC_L2_BACKEND=none
 export VLLM_IPC_MODE=service:lmcache
 export VLLM_PID_MODE=service:lmcache
-export KV_TRANSFER_ARG="--kv-transfer-config '{\"kv_connector\":\"LMCacheMPConnector\",\"kv_role\":\"kv_both\",\"kv_connector_extra_config\":{\"lmcache.mp.host\":\"tcp://localhost\",\"lmcache.mp.port\":6555}}'"
+# PID/IPC namespace sharing is required for HIP IPC, but networking remains
+# isolated per Compose service.  Reach LMCache through Compose DNS rather than
+# vLLM's own loopback interface.
+export KV_TRANSFER_ARG="--kv-transfer-config '{\"kv_connector\":\"LMCacheMPConnector\",\"kv_role\":\"kv_both\",\"kv_connector_extra_config\":{\"lmcache.mp.host\":\"tcp://aic-lmcache\",\"lmcache.mp.port\":6555}}'"
 mkdir -p "\${HF_HOME}" /tmp/aic-tiny-nvme /tmp/aic-tiny-nfs
 
 compose() { docker compose -f '${AIC_DAY_DIR}/docker/docker-compose.yml' "\$@"; }
@@ -1207,9 +1210,11 @@ if ! compose --profile cache up -d; then
 fi
 
 # Wait for the vLLM endpoint (weights load + one-time model download).
+# vLLM is intentionally reachable only on the Compose network, so probe from
+# inside its container instead of the Slurm host's loopback interface.
 ready=0
 for _i in \$(seq 1 ${AIC_TINY_READY_TIMEOUT}); do
-    if curl -fsS http://localhost:8000/v1/models >/dev/null 2>&1; then ready=1; break; fi
+    if docker exec aic-vllm-gpu0 curl -fsS http://127.0.0.1:8000/v1/models >/dev/null 2>&1; then ready=1; break; fi
     sleep 5
 done
 if [ "\${ready}" != "1" ]; then
@@ -1221,7 +1226,7 @@ echo "[tiny-test] endpoint ready; sending one chat completion ..."
 
 # One real completion; assert a NON-EMPTY assistant content came back through the
 # LMCacheMPConnector path.
-resp="\$(curl -fsS http://localhost:8000/v1/chat/completions \
+resp="\$(docker exec aic-vllm-gpu0 curl -fsS http://127.0.0.1:8000/v1/chat/completions \
     -H 'Content-Type: application/json' \
     -d '{"model":"${AIC_TINY_MODEL}","messages":[{"role":"user","content":"Reply with the single word: pong"}],"max_tokens":16,"temperature":0}' 2>&1)" || {
     echo "[tiny-test] FAIL: completion request failed: \${resp}" >&2; exit 1; }
