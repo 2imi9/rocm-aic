@@ -326,6 +326,19 @@ PROLOGUE
 )"
 
     local jobid="" logfile="" rc=0
+    local active_job_file="${AIC_CI_ACTIVE_JOB_FILE:-}"
+
+    _record_active_job() {
+        [[ -n "${active_job_file}" ]] || return 0
+        mkdir -p "$(dirname "${active_job_file}")"
+        printf '%s\n' "${jobid}" > "${active_job_file}.tmp.${BASHPID}"
+        mv -f "${active_job_file}.tmp.${BASHPID}" "${active_job_file}"
+    }
+
+    _clear_active_job() {
+        [[ -n "${active_job_file}" ]] || return 0
+        rm -f "${active_job_file}" 2>/dev/null || true
+    }
 
     if [[ "${AIC_SPUR_CLUSTER}" == "1" ]]; then
         # SPUR sbatch does not support --parsable, --wait, or reading the script
@@ -349,6 +362,7 @@ PROLOGUE
 
         jobid="$(printf '%s\n' "${submit_out}" | grep -oE '[0-9]+$' | tail -1)"
         [[ -n "${jobid}" ]] || die "could not parse job id from sbatch output: ${submit_out}"
+        _record_active_job
         logfile="${AIC_DAY_DIR}/logs/${jobid}/${logname}.out"
         log "submitted ${jobname} as job ${jobid} (partition ${AIC_BUILD_PARTITION})"
         log "log: ${logfile}"
@@ -446,6 +460,7 @@ PROLOGUE
             sleep 0.2; tries=$((tries + 1))
         done
         jobid="$(head -n1 "${idfile}" 2>/dev/null | tr -d '[:space:]' | cut -d';' -f1)"
+        [[ -z "${jobid}" ]] || _record_active_job
 
         logfile="${AIC_DAY_DIR}/logs/${jobid:-unknown}/${logname}.out"
         if [[ -n "${jobid}" ]]; then
@@ -469,6 +484,7 @@ PROLOGUE
         rm -f "${idfile}" 2>/dev/null || true
     fi
 
+    _clear_active_job
     return "${rc}"
 }
 
