@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-# Shared lifecycle helpers for CI wrappers that run work on the SPUR head node.
+# Shared lifecycle helpers for installed CI wrappers that run work on the SPUR head node.
 # Call aic_ci_session_init before starting SSH, then use aic_ci_ssh_bash for the
 # remote heredoc.  If the local wrapper is interrupted, its EXIT trap reconnects
 # and cancels only the Slurm job/process group recorded for this run and stage.

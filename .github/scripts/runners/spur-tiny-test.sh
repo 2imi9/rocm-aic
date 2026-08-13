@@ -1,17 +1,27 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Runs on the self-hosted runner; SSHes to the SPUR head node (AIC_SPUR_HOST) and
-# runs the requested smoke-test target against the tarball produced by
-# spur-dist-build.sh for the same SHA. The tarball is left in place for
-# spur-tiny-test.sh; the run-attempt-scoped clone is always removed.
+# Installed on the self-hosted runner; SSHes to the SPUR head node (AIC_SPUR_HOST) and runs tiny-test
+# against the tarball produced by spur-dist-build.sh for the same SHA (the stage
+# after spur-smoke-test.sh).  tiny-test brings up the compose MP stack
+# (standalone lmcache server + vLLM LMCacheMPConnector) with a tiny model and
+# asserts one non-empty chat completion.
+#
+# Tarball cleanup ownership depends on whether a cliff stage follows:
+#   * PR flow (dist-build -> smoke-test -> tiny-test): tiny-test is terminal, so
+#     it removes the tarball on exit.
+#   * Nightly (dist-build -> smoke -> tiny -> cliff): cliff runs next and needs
+#     the tarball, so the nightly tiny-test step sets KEEP_ARTIFACTS=1.
+# The run-attempt-scoped clone is always removed best-effort.
+# The tiny model uses the cluster-wide HF cache so it is downloaded once and
+# reused across CI workflows and SPUR accounts.
 
-SHA="${1:?usage: $0 <full-sha> [smoke-test|smoke-test-fast]}"
-AIC_SMOKE_TEST_TARGET="${2:-smoke-test}"
-case "${AIC_SMOKE_TEST_TARGET}" in
-    smoke-test | smoke-test-fast) ;;
+SHA="${1:?usage: $0 <full-sha> [tiny-test|tiny-test-fast]}"
+AIC_TINY_TEST_TARGET="${2:-tiny-test}"
+case "${AIC_TINY_TEST_TARGET}" in
+    tiny-test | tiny-test-fast) ;;
     *)
-        echo "ERROR: unsupported smoke-test target: ${AIC_SMOKE_TEST_TARGET}" >&2
+        echo "ERROR: unsupported tiny-test target: ${AIC_TINY_TEST_TARGET}" >&2
         exit 2
         ;;
 esac
@@ -22,21 +32,24 @@ AIC_SPUR_HOST="${AIC_SPUR_HOST//[$'\t\r\n ']}"
 AIC_SHARED_NFS="${AIC_SHARED_NFS:?AIC_SHARED_NFS must be set (e.g. via GitHub repo variable)}"
 AIC_SPUR_CONTROLLER="${AIC_SPUR_CONTROLLER:?AIC_SPUR_CONTROLLER must be set (e.g. via GitHub repo variable)}"
 AIC_CI_STORAGE_ROOT="${AIC_CI_STORAGE_ROOT:-}"
+KEEP_ARTIFACTS="${KEEP_ARTIFACTS:-0}"
 REPO="https://github.com/ROCm/rocm-aic.git"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=.github/scripts/spur-ci-common.sh
+# shellcheck source=.github/scripts/runners/spur-ci-common.sh
 source "${SCRIPT_DIR}/spur-ci-common.sh"
-aic_ci_session_init "${SHORT}" "smoke-test"
+aic_ci_session_init "${SHORT}" "tiny-test"
 
 aic_ci_ssh_bash \
     SHA="${SHA}" \
     REPO="${REPO}" \
     AIC_IMAGE_NAME="${AIC_IMAGE_NAME}" \
-    AIC_SMOKE_TEST_TARGET="${AIC_SMOKE_TEST_TARGET}" \
+    AIC_TINY_TEST_TARGET="${AIC_TINY_TEST_TARGET}" \
     AIC_SHARED_NFS="${AIC_SHARED_NFS}" \
     AIC_CI_STORAGE_ROOT="${AIC_CI_STORAGE_ROOT}" \
+    KEEP_ARTIFACTS="${KEEP_ARTIFACTS}" \
     AIC_SPUR_CONTROLLER="${AIC_SPUR_CONTROLLER}" \
-    SPUR_CONTROLLER_ADDR="${AIC_SPUR_CONTROLLER}" << 'REMOTE'
+    SPUR_CONTROLLER_ADDR="${AIC_SPUR_CONTROLLER}" \
+    HF_TOKEN="${HF_TOKEN:-}" << 'REMOTE'
 set -euo pipefail
 
 SHORT="${SHA:0:7}"
@@ -65,8 +78,8 @@ _cleanup() {
     trap - EXIT
     echo "=== Cleaning up run-attempt worktree ==="
     _best_effort_remove "${WORKDIR}"
-    if (( rc != 0 )); then
-        echo "=== Smoke test failed — removing staged image ==="
+    if (( rc != 0 )) || [[ "${KEEP_ARTIFACTS}" != "1" ]]; then
+        echo "=== Removing staged image ==="
         _best_effort_remove "${TARBALL_DIR}"
     fi
     if (( rc == 0 )); then
@@ -76,7 +89,8 @@ _cleanup() {
 }
 trap _cleanup EXIT
 
-# Re-clone if WORKDIR is missing or checked out at the wrong SHA.
+# Re-clone if WORKDIR is missing or checked out at the wrong SHA (e.g. stale
+# leftover from a prior failed run at a different commit with the same prefix).
 ACTUAL_SHA="$(git -C "${WORKDIR}" rev-parse HEAD 2>/dev/null || true)"
 if [[ ! -d "${WORKDIR}" || "${ACTUAL_SHA}" != "${SHA}" ]]; then
     echo "=== (Re-)cloning ${REPO} at ${SHA} ==="
@@ -85,13 +99,14 @@ if [[ ! -d "${WORKDIR}" || "${ACTUAL_SHA}" != "${SHA}" ]]; then
     git -C "${WORKDIR}" checkout "${SHA}"
 fi
 
-echo "=== Running ${AIC_SMOKE_TEST_TARGET} (AIC_IMAGE_NAME=${AIC_IMAGE_NAME}) ==="
+echo "=== Running ${AIC_TINY_TEST_TARGET} (AIC_IMAGE_NAME=${AIC_IMAGE_NAME}) ==="
 AIC_SPUR_CLUSTER=1 \
     AIC_IMAGE_NAME="${AIC_IMAGE_NAME}" \
     AIC_IMAGE_DIR="${TARBALL_DIR}" \
-    make -C "${WORKDIR}" "${AIC_SMOKE_TEST_TARGET}"
+    HF_TOKEN="${HF_TOKEN:-}" \
+    make -C "${WORKDIR}" "${AIC_TINY_TEST_TARGET}"
 
-echo "=== ${AIC_SMOKE_TEST_TARGET} complete ==="
+echo "=== ${AIC_TINY_TEST_TARGET} complete ==="
 REMOTE
 
-echo "Smoke test passed for ${SHORT}"
+echo "Tiny test passed for ${SHORT}"

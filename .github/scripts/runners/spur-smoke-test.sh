@@ -1,38 +1,38 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Runs on the self-hosted runner; SSHes to the SPUR head node (AIC_SPUR_HOST), clones the repo at
-# the current SHA, and runs the requested dist-build target with a CI-scoped
-# image name and tarball path.  The tarball is left in place for
-# spur-smoke-test.sh; the run-attempt-scoped clone is always removed.
+# Installed on the self-hosted runner; SSHes to the SPUR head node (AIC_SPUR_HOST) and
+# runs the requested smoke-test target against the tarball produced by
+# spur-dist-build.sh for the same SHA. The tarball is left in place for
+# spur-tiny-test.sh; the run-attempt-scoped clone is always removed.
 
-SHA="${1:?usage: $0 <full-sha> [dist-build|dist-build-fast]}"
-AIC_DIST_BUILD_TARGET="${2:-dist-build}"
-case "${AIC_DIST_BUILD_TARGET}" in
-    dist-build | dist-build-fast) ;;
+SHA="${1:?usage: $0 <full-sha> [smoke-test|smoke-test-fast]}"
+AIC_SMOKE_TEST_TARGET="${2:-smoke-test}"
+case "${AIC_SMOKE_TEST_TARGET}" in
+    smoke-test | smoke-test-fast) ;;
     *)
-        echo "ERROR: unsupported build target: ${AIC_DIST_BUILD_TARGET}" >&2
+        echo "ERROR: unsupported smoke-test target: ${AIC_SMOKE_TEST_TARGET}" >&2
         exit 2
         ;;
 esac
 SHORT="${SHA:0:7}"
-REPO="https://github.com/ROCm/rocm-aic.git"
 AIC_IMAGE_NAME="rocm-aic-ci-${SHORT}"
 AIC_SPUR_HOST="${AIC_SPUR_HOST:?AIC_SPUR_HOST must be set (e.g. via GitHub repo variable)}"
 AIC_SPUR_HOST="${AIC_SPUR_HOST//[$'\t\r\n ']}"
 AIC_SHARED_NFS="${AIC_SHARED_NFS:?AIC_SHARED_NFS must be set (e.g. via GitHub repo variable)}"
 AIC_SPUR_CONTROLLER="${AIC_SPUR_CONTROLLER:?AIC_SPUR_CONTROLLER must be set (e.g. via GitHub repo variable)}"
 AIC_CI_STORAGE_ROOT="${AIC_CI_STORAGE_ROOT:-}"
+REPO="https://github.com/ROCm/rocm-aic.git"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=.github/scripts/spur-ci-common.sh
+# shellcheck source=.github/scripts/runners/spur-ci-common.sh
 source "${SCRIPT_DIR}/spur-ci-common.sh"
-aic_ci_session_init "${SHORT}" "dist-build"
+aic_ci_session_init "${SHORT}" "smoke-test"
 
 aic_ci_ssh_bash \
     SHA="${SHA}" \
     REPO="${REPO}" \
     AIC_IMAGE_NAME="${AIC_IMAGE_NAME}" \
-    AIC_DIST_BUILD_TARGET="${AIC_DIST_BUILD_TARGET}" \
+    AIC_SMOKE_TEST_TARGET="${AIC_SMOKE_TEST_TARGET}" \
     AIC_SHARED_NFS="${AIC_SHARED_NFS}" \
     AIC_CI_STORAGE_ROOT="${AIC_CI_STORAGE_ROOT}" \
     AIC_SPUR_CONTROLLER="${AIC_SPUR_CONTROLLER}" \
@@ -43,7 +43,6 @@ SHORT="${SHA:0:7}"
 WORKDIR="$HOME/Projects/rocm-aic.${SHORT}.${AIC_CI_RUN_KEY}"
 CI_STORAGE_ROOT="${AIC_CI_STORAGE_ROOT:-$HOME/Projects/rocm-aic-ci}"
 TARBALL_DIR="${CI_STORAGE_ROOT}/images/aic-ci-${SHORT}"
-CACHE_DIR="${CI_STORAGE_ROOT}/buildcache"
 CONTROL_PREFIX="${CI_STORAGE_ROOT}/control/${SHORT}.${AIC_CI_RUN_KEY}.${AIC_CI_STAGE}"
 PID_FILE="${CONTROL_PREFIX}.pid"
 JOB_FILE="${CONTROL_PREFIX}.job"
@@ -67,7 +66,7 @@ _cleanup() {
     echo "=== Cleaning up run-attempt worktree ==="
     _best_effort_remove "${WORKDIR}"
     if (( rc != 0 )); then
-        echo "=== Build failed — removing staged image ==="
+        echo "=== Smoke test failed — removing staged image ==="
         _best_effort_remove "${TARBALL_DIR}"
     fi
     if (( rc == 0 )); then
@@ -77,22 +76,22 @@ _cleanup() {
 }
 trap _cleanup EXIT
 
-echo "=== Cloning ${REPO} at ${SHA} into ${WORKDIR} ==="
-rm -rf "${WORKDIR}"
-git clone --filter=blob:none --no-single-branch "${REPO}" "${WORKDIR}"
-cd "${WORKDIR}"
-git checkout "${SHA}"
+# Re-clone if WORKDIR is missing or checked out at the wrong SHA.
+ACTUAL_SHA="$(git -C "${WORKDIR}" rev-parse HEAD 2>/dev/null || true)"
+if [[ ! -d "${WORKDIR}" || "${ACTUAL_SHA}" != "${SHA}" ]]; then
+    echo "=== (Re-)cloning ${REPO} at ${SHA} ==="
+    rm -rf "${WORKDIR}"
+    git clone --filter=blob:none --no-single-branch "${REPO}" "${WORKDIR}"
+    git -C "${WORKDIR}" checkout "${SHA}"
+fi
 
-mkdir -p "${TARBALL_DIR}"
-
-echo "=== Running ${AIC_DIST_BUILD_TARGET} (AIC_SPUR_CLUSTER=1, AIC_IMAGE_NAME=${AIC_IMAGE_NAME}) ==="
+echo "=== Running ${AIC_SMOKE_TEST_TARGET} (AIC_IMAGE_NAME=${AIC_IMAGE_NAME}) ==="
 AIC_SPUR_CLUSTER=1 \
     AIC_IMAGE_NAME="${AIC_IMAGE_NAME}" \
     AIC_IMAGE_DIR="${TARBALL_DIR}" \
-    AIC_CACHE_DIR="${CACHE_DIR}" \
-    make "${AIC_DIST_BUILD_TARGET}"
+    make -C "${WORKDIR}" "${AIC_SMOKE_TEST_TARGET}"
 
-echo "=== ${AIC_DIST_BUILD_TARGET} complete — tarball in ${TARBALL_DIR} ==="
+echo "=== ${AIC_SMOKE_TEST_TARGET} complete ==="
 REMOTE
 
-echo "Build succeeded for ${SHORT}"
+echo "Smoke test passed for ${SHORT}"
