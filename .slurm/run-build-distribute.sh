@@ -123,6 +123,8 @@
 #                        (default: <site>&GFX942&NVME -- MI300X + local NVMe).
 #                        Used only when AIC_TEST_NODE is unset.
 #   AIC_TEST_NODE        pin an exact test node via --nodelist  (default: unset)
+#   AIC_TEST_GRES        Slurm GPU resource request for smoke/tiny tests
+#                        (default: gpu:1)
 #   AIC_TEST_TIME        test job time limit               (default: 00:20:00)
 #   AIC_TEST_CPUS        --cpus-per-task for the test job  (default: 8)
 #   AIC_TEST_MEM         --mem for the test job            (default: 32G)
@@ -216,6 +218,7 @@ AIC_CACHE_INSECURE="${AIC_CACHE_INSECURE:-}"
 AIC_TEST_TIME="${AIC_TEST_TIME:-00:45:00}"
 AIC_TEST_CPUS="${AIC_TEST_CPUS:-8}"
 AIC_TEST_MEM="${AIC_TEST_MEM:-32G}"
+AIC_TEST_GRES="${AIC_TEST_GRES:-gpu:1}"
 
 # --- tiny-test: end-to-end serve check with a tiny model ---------------------
 # Brings up the compose MP stack (standalone lmcache + vLLM LMCacheMPConnector)
@@ -1018,6 +1021,12 @@ SMOKE
 set -euo pipefail
 command -v docker >/dev/null 2>&1 || { echo "\$(hostname): docker not found" >&2; exit 1; }
 echo "[test] host=\$(hostname) docker=\$(docker --version)"
+# Preserve Slurm's single-GPU allocation inside Docker.  SPUR sets
+# ROCR_VISIBLE_DEVICES for --gres=gpu:1; CUDA_VISIBLE_DEVICES is the fallback
+# used by some standard Slurm installations.
+_gpu_visible="\${ROCR_VISIBLE_DEVICES:-\${CUDA_VISIBLE_DEVICES:-0}}"
+_gpu_visible="\${_gpu_visible%%,*}"
+echo "[test] allocated gpu=\${_gpu_visible}"
 # Load the image from the shared tarball only when needed.  A node-local marker
 # records the tarball mtime that was last loaded here; we reload when the tarball
 # is newer (a rebuild happened), when the image is absent, or when forced.  We
@@ -1049,6 +1058,7 @@ docker run --rm \
     --cap-add SYS_PTRACE --cap-add SYS_ADMIN \
     --security-opt seccomp=unconfined \
     \${kmounts} \
+    -e ROCR_VISIBLE_DEVICES="\${_gpu_visible}" \
     -e EXPECT_ARCH='${AIC_ROCM_ARCH}' \
     -v '${smoketest}':/tmp/aic-smoketest.sh:ro \
     --entrypoint /bin/bash \
@@ -1094,7 +1104,9 @@ exit \${img_rc}
 REMOTE
 )"
 
-    local -a _gres_arg=(); [[ "${AIC_SPUR_CLUSTER}" != "1" ]] && _gres_arg=(--gres=gpu:1)
+    # Always reserve a GPU.  Omitting GRES on SPUR lets Slurm co-locate this job
+    # with an existing GPU workload, even though the test launches ROCm code.
+    local -a _gres_arg=(--gres="${AIC_TEST_GRES}")
     _sbatch_run aic-test smoke-test "${remote_script}" \
         "${_sel[@]}" \
         "${_gres_arg[@]}" \
@@ -1131,6 +1143,14 @@ cmd_tiny_test() {
 set -uo pipefail
 command -v docker >/dev/null 2>&1 || { echo "\$(hostname): docker not found" >&2; exit 1; }
 echo "[tiny-test] host=\$(hostname) docker=\$(docker --version)"
+# Preserve the GPU selected by Slurm instead of unconditionally exposing host
+# GPU 0 to both vLLM and LMCache.  A single-GPU GRES normally maps this to 0,
+# while the fallback keeps non-Slurm/manual execution working.
+_gpu_visible="\${ROCR_VISIBLE_DEVICES:-\${CUDA_VISIBLE_DEVICES:-0}}"
+_gpu_visible="\${_gpu_visible%%,*}"
+export GPU="\${_gpu_visible}"
+VLLM_CONTAINER="aic-vllm-gpu\${GPU}"
+echo "[tiny-test] allocated gpu=\${GPU} container=\${VLLM_CONTAINER}"
 
 # Load the image from the shared tarball only when needed (same marker logic as
 # smoke-test): reload when forced, absent, or the tarball is newer.
@@ -1157,7 +1177,6 @@ ensure_compose || { echo "[tiny-test] docker compose unavailable and could not b
 export IMAGE_REF='${AIC_IMAGE}'
 export IMAGE_NAME='${AIC_IMAGE%:*}'
 export ROCM_ARCH='${AIC_ROCM_ARCH}'
-export GPU=0
 export VLLM_MODEL='${AIC_TINY_MODEL}'
 export HF_HOME='${HF_HOME}'
 export HF_TOKEN='${HF_TOKEN:-}'
@@ -1196,7 +1215,7 @@ cleanup() {
     pkill -9 -f 'lmcache server'          2>/dev/null || true
     sleep 2
     timeout 60 compose --profile cache down --remove-orphans --timeout 5 >/dev/null 2>&1 || true
-    for c in aic-vllm-gpu0 aic-lmcache; do timeout 30 docker rm -f "\$c" >/dev/null 2>&1 || true; done
+    for c in "\${VLLM_CONTAINER}" aic-lmcache; do timeout 30 docker rm -f "\$c" >/dev/null 2>&1 || true; done
     rm -rf /tmp/aic-tiny-nvme /tmp/aic-tiny-nfs 2>/dev/null || true
 }
 trap cleanup EXIT
@@ -1214,7 +1233,14 @@ fi
 # inside its container instead of the Slurm host's loopback interface.
 ready=0
 for _i in \$(seq 1 ${AIC_TINY_READY_TIMEOUT}); do
-    if docker exec aic-vllm-gpu0 curl -fsS http://127.0.0.1:8000/v1/models >/dev/null 2>&1; then ready=1; break; fi
+    if docker exec "\${VLLM_CONTAINER}" curl -fsS http://127.0.0.1:8000/v1/models >/dev/null 2>&1; then ready=1; break; fi
+    _vllm_state="\$(docker inspect --format '{{.State.Status}}' "\${VLLM_CONTAINER}" 2>/dev/null || true)"
+    if [ "\${_vllm_state}" != "running" ]; then
+        _vllm_exit="\$(docker inspect --format '{{.State.ExitCode}}' "\${VLLM_CONTAINER}" 2>/dev/null || echo unknown)"
+        echo "[tiny-test] FAIL: vLLM exited before readiness (state=\${_vllm_state:-missing}, exit=\${_vllm_exit})" >&2
+        compose logs --tail 80 --no-color vllm 2>&1 | sed 's/^/  [vllm] /'
+        exit 1
+    fi
     sleep 5
 done
 if [ "\${ready}" != "1" ]; then
@@ -1226,7 +1252,7 @@ echo "[tiny-test] endpoint ready; sending one chat completion ..."
 
 # One real completion; assert a NON-EMPTY assistant content came back through the
 # LMCacheMPConnector path.
-resp="\$(docker exec aic-vllm-gpu0 curl -fsS http://127.0.0.1:8000/v1/chat/completions \
+resp="\$(docker exec "\${VLLM_CONTAINER}" curl -fsS http://127.0.0.1:8000/v1/chat/completions \
     -H 'Content-Type: application/json' \
     -d '{"model":"${AIC_TINY_MODEL}","messages":[{"role":"user","content":"Reply with the single word: pong"}],"max_tokens":16,"temperature":0}' 2>&1)" || {
     echo "[tiny-test] FAIL: completion request failed: \${resp}" >&2; exit 1; }
@@ -1240,7 +1266,8 @@ exit 1
 REMOTE
 )"
 
-    local -a _gres_arg=(); [[ "${AIC_SPUR_CLUSTER}" != "1" ]] && _gres_arg=(--gres=gpu:1)
+    # Always reserve a GPU; see cmd_test for why SPUR must not omit GRES.
+    local -a _gres_arg=(--gres="${AIC_TEST_GRES}")
     _sbatch_run aic-tiny-test tiny-test "${remote_script}" \
         "${_sel[@]}" \
         "${_gres_arg[@]}" \
