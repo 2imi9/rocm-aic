@@ -35,7 +35,7 @@ AIC_CI_STORAGE_ROOT="${AIC_CI_STORAGE_ROOT:-}"
 KEEP_ARTIFACTS="${KEEP_ARTIFACTS:-0}"
 REPO="https://github.com/ROCm/rocm-aic.git"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=spur-ci-common.sh
+# shellcheck source=.github/scripts/spur-ci-common.sh
 source "${SCRIPT_DIR}/spur-ci-common.sh"
 aic_ci_session_init "${SHORT}" "tiny-test"
 

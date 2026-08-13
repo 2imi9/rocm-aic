@@ -24,7 +24,7 @@ AIC_SPUR_CONTROLLER="${AIC_SPUR_CONTROLLER:?AIC_SPUR_CONTROLLER must be set (e.g
 AIC_CI_STORAGE_ROOT="${AIC_CI_STORAGE_ROOT:-}"
 REPO="https://github.com/ROCm/rocm-aic.git"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=spur-ci-common.sh
+# shellcheck source=.github/scripts/spur-ci-common.sh
 source "${SCRIPT_DIR}/spur-ci-common.sh"
 aic_ci_session_init "${SHORT}" "smoke-test"
 
