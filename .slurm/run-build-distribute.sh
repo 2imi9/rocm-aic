@@ -201,6 +201,8 @@ else
     AIC_BUILD_CONSTRAINT="${AIC_BUILD_CONSTRAINT:-CPUONLY}"
     AIC_TEST_CONSTRAINT="${AIC_TEST_CONSTRAINT:-GFX942&NVME}"
 fi
+AIC_SLURM_ACCOUNT="${AIC_SLURM_ACCOUNT:-}"
+AIC_PIP_WHEELS_DIR="${AIC_PIP_WHEELS_DIR:-}"
 AIC_BUILD_CPUS="${AIC_BUILD_CPUS:-32}"
 AIC_BUILD_TIME="${AIC_BUILD_TIME:-02:00:00}"
 AIC_LOAD_TIME="${AIC_LOAD_TIME:-00:30:00}"
@@ -339,6 +341,7 @@ PROLOGUE
             --controller="${AIC_SPUR_CONTROLLER}" \
             --job-name="${jobname}" \
             --partition="${AIC_BUILD_PARTITION}" \
+            ${AIC_SLURM_ACCOUNT:+--account="${AIC_SLURM_ACCOUNT}"} \
             --output=/dev/null \
             "$@" \
             "${tmpscript}" 2>&1)" || { rm -f "${tmpscript}"; die "sbatch submission failed: ${submit_out}"; }
@@ -431,6 +434,7 @@ PROLOGUE
         "${_stdbuf[@]}" sbatch --parsable --wait \
             --job-name="${jobname}" \
             --partition="${AIC_BUILD_PARTITION}" \
+            ${AIC_SLURM_ACCOUNT:+--account="${AIC_SLURM_ACCOUNT}"} \
             --output=/dev/null \
             "$@" \
             <<<"${script}" >"${idfile}" &
@@ -551,6 +555,18 @@ cmd_build() {
         _builder_setup="${_pre}${_mkdir}if ! docker buildx inspect ${AIC_BUILDX_BUILDER} >/dev/null 2>&1; then echo '[build] creating buildx builder ${AIC_BUILDX_BUILDER} (docker-container)'; docker buildx create --name ${AIC_BUILDX_BUILDER} --driver docker-container${_cfg_arg} >/dev/null; fi; docker buildx inspect --bootstrap ${AIC_BUILDX_BUILDER} >/dev/null"
     fi
 
+    # pip-wheels build context: supply a local wheel cache dir to skip the 6 GB
+    # torch download.  If AIC_PIP_WHEELS_DIR is unset, fall back to an empty
+    # sentinel dir on shared storage so BuildKit does not try to pull the
+    # non-existent docker.io/library/pip-wheels image.
+    local _pip_wheels_dir="${AIC_PIP_WHEELS_DIR}"
+    if [[ -z "${_pip_wheels_dir}" ]]; then
+        _pip_wheels_dir="${AIC_DAY_DIR}/.empty-pip-wheels"
+        mkdir -p "${_pip_wheels_dir}"
+    fi
+    local _pip_wheels_arg="--build-context pip-wheels=${_pip_wheels_dir}"
+    log "pip-wheels context: ${_pip_wheels_dir}"
+
     # The build + save block runs on ONE node so the saved tarball comes from the
     # image that was just built.  Values are baked in here (not passed via env)
     # to keep it robust regardless of sbatch environment propagation.
@@ -590,6 +606,7 @@ docker buildx build --builder ${AIC_BUILDX_BUILDER} --progress=plain --output ty
     ${_version_build_args} \
     ${_secret_arg} \
     ${_cache_args} \
+    ${_pip_wheels_arg} \
     -f "${AIC_DAY_DIR}/docker/Dockerfile" \
     -t "${AIC_IMAGE}" \
     -t "${latest_ref}" \
@@ -1159,7 +1176,10 @@ export LMCACHE_L1_SIZE_GB=4
 export AIC_L2_BACKEND=none
 export VLLM_IPC_MODE=service:lmcache
 export VLLM_PID_MODE=service:lmcache
-export KV_TRANSFER_ARG="--kv-transfer-config '{\"kv_connector\":\"LMCacheMPConnector\",\"kv_role\":\"kv_both\",\"kv_connector_extra_config\":{\"lmcache.mp.host\":\"tcp://localhost\",\"lmcache.mp.port\":6555}}'"
+# PID/IPC namespace sharing is required for HIP IPC, but networking remains
+# isolated per Compose service.  Reach LMCache through Compose DNS rather than
+# vLLM's own loopback interface.
+export KV_TRANSFER_ARG="--kv-transfer-config '{\"kv_connector\":\"LMCacheMPConnector\",\"kv_role\":\"kv_both\",\"kv_connector_extra_config\":{\"lmcache.mp.host\":\"tcp://aic-lmcache\",\"lmcache.mp.port\":6555}}'"
 mkdir -p "\${HF_HOME}" /tmp/aic-tiny-nvme /tmp/aic-tiny-nfs
 
 compose() { docker compose -f '${AIC_DAY_DIR}/docker/docker-compose.yml' "\$@"; }
@@ -1190,9 +1210,11 @@ if ! compose --profile cache up -d; then
 fi
 
 # Wait for the vLLM endpoint (weights load + one-time model download).
+# vLLM is intentionally reachable only on the Compose network, so probe from
+# inside its container instead of the Slurm host's loopback interface.
 ready=0
 for _i in \$(seq 1 ${AIC_TINY_READY_TIMEOUT}); do
-    if curl -fsS http://localhost:8000/v1/models >/dev/null 2>&1; then ready=1; break; fi
+    if docker exec aic-vllm-gpu0 curl -fsS http://127.0.0.1:8000/v1/models >/dev/null 2>&1; then ready=1; break; fi
     sleep 5
 done
 if [ "\${ready}" != "1" ]; then
@@ -1204,7 +1226,7 @@ echo "[tiny-test] endpoint ready; sending one chat completion ..."
 
 # One real completion; assert a NON-EMPTY assistant content came back through the
 # LMCacheMPConnector path.
-resp="\$(curl -fsS http://localhost:8000/v1/chat/completions \
+resp="\$(docker exec aic-vllm-gpu0 curl -fsS http://127.0.0.1:8000/v1/chat/completions \
     -H 'Content-Type: application/json' \
     -d '{"model":"${AIC_TINY_MODEL}","messages":[{"role":"user","content":"Reply with the single word: pong"}],"max_tokens":16,"temperature":0}' 2>&1)" || {
     echo "[tiny-test] FAIL: completion request failed: \${resp}" >&2; exit 1; }

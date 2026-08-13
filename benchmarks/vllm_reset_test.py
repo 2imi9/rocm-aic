@@ -197,7 +197,7 @@ def main():
     dummy = post_json(f"{VLLM}/v1/chat/completions", {
         "model": MODEL, "messages": [{"role": "user", "content": "hi"}],
         "max_tokens": 5, "temperature": 0.0,
-    }, timeout=30)
+    }, timeout=TIMEOUT)
     if dummy is None or "choices" not in dummy:
         log("ERROR: vLLM not responding or model not loaded", prefix="✗ ")
         sys.exit(1)
