@@ -2,150 +2,31 @@
 #
 # SPDX-License-Identifier: MIT
 #
-# Automatically opens a PR to sync README.md version shields whenever
-# docker/Dockerfile component ARGs are updated on main.
+# Prevent component metadata in README.md from drifting from the source-built
+# stack declared in docker/Dockerfile.
 
-name: AIC Update README Shields
+name: AIC README Version Check
 
 on:
-  push:
-    branches: [main]
-    paths: [docker/Dockerfile]
   pull_request:
-    paths: [.github/workflows/aic-update-readme-shields.yml]
-  workflow_dispatch:
+    branches: [main]
+    types: [opened, synchronize, reopened, edited]
+
+permissions:
+  contents: read
 
 jobs:
-  update-shields:
-    name: Sync README version shields
+  check-readme-versions:
+    name: README version metadata
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
-      pull-requests: write
 
     steps:
       - uses: actions/checkout@v4
-
-      - name: Extract versions from Dockerfile
-        id: vers
-        run: |
-          set -euo pipefail
-          arg() {
-            local name="$1" value
-            value="$(awk -v prefix="ARG ${name}=" '
-              index($0, prefix) == 1 {
-                print substr($0, length(prefix) + 1)
-                exit
-              }
-            ' docker/Dockerfile)"
-            test -n "${value}" || {
-              echo "ERROR: ${name} is not set in docker/Dockerfile" >&2
-              return 1
-            }
-            printf '%s\n' "${value}"
-          }
-
-          ROCM="$(arg ROCM_VERSION)"
-          ROCM_BASE_IMAGE="$(arg ROCM_BASE_IMAGE)"
-          ROCM_BASE_IMAGE="${ROCM_BASE_IMAGE//\$\{ROCM_VERSION\}/${ROCM}}"
-          VLLM="$(arg VLLM_REF)"
-          LMCACHE="$(arg LMCACHE_REF)"
-          NIXL="$(arg NIXL_REF)"
-          HSA="$(arg HSA_SNOOP_REF)"
-
-          case "${ROCM_BASE_IMAGE}" in
-            *\$\{*)
-              echo "ERROR: unresolved variable in ROCM_BASE_IMAGE=${ROCM_BASE_IMAGE}" >&2
-              exit 1
-              ;;
-          esac
-
-          {
-            echo "rocm=${ROCM}"
-            echo "rocm_base=${ROCM_BASE_IMAGE}"
-            echo "vllm=${VLLM}"
-            echo "lmcache=${LMCACHE}"
-            echo "nixl=${NIXL}"
-            echo "hsa=${HSA}"
-          } >> "${GITHUB_OUTPUT}"
-
-      - name: Update README shields and prose
-        env:
-          ROCM:      ${{ steps.vers.outputs.rocm }}
-          ROCM_BASE: ${{ steps.vers.outputs.rocm_base }}
-          VLLM:      ${{ steps.vers.outputs.vllm }}
-          LMCACHE:   ${{ steps.vers.outputs.lmcache }}
-          NIXL:      ${{ steps.vers.outputs.nixl }}
-          HSA:       ${{ steps.vers.outputs.hsa }}
-        run: |
-          set -euo pipefail
-          LMCACHE_PATCH_COUNT="$(find patches/lmcache -maxdepth 1 -name '*.patch' | awk 'END { print NR }')"
-          test "${LMCACHE_PATCH_COUNT}" -gt 0
-          export LMCACHE_PATCH_COUNT
-          python3 - <<'PY'
-          import os
-          import re
-          from pathlib import Path
-
-          path = Path("README.md")
-          text = path.read_text()
-
-          def replace(pattern: str, replacement: str, label: str) -> None:
-              global text
-              text, count = re.subn(pattern, replacement, text, flags=re.MULTILINE)
-              if count != 1:
-                  raise SystemExit(f"README sync: expected one {label}, found {count}")
-
-          rocm = os.environ["ROCM"]
-          rocm_short = ".".join(rocm.split(".")[:2])
-          vllm = os.environ["VLLM"]
-          lmcache = os.environ["LMCACHE"]
-          nixl = os.environ["NIXL"]
-          hsa = os.environ["HSA"]
-          patches = os.environ["LMCACHE_PATCH_COUNT"]
-          updates = (
-              ("ROCm badge", r"ROCm-[0-9.]+-green", f"ROCm-{rocm}-green"),
-              ("vLLM badge", r"vLLM-[^/]+?-blue\.svg", f"vLLM-{vllm}-blue.svg"),
-              ("LMCache badge", r"LMCache-[^/]+?-blue\.svg", f"LMCache-{lmcache}-blue.svg"),
-              ("NIXL badge", r"NIXL-[^/]+?-blue\.svg", f"NIXL-{nixl}-blue.svg"),
-              ("hsa-snoop badge", r"hsa--snoop-[^/]+?-blue\.svg", f"hsa--snoop-{hsa}-blue.svg"),
-              ("base image row", r"(\| Base OS \| )`[^`]+`( \| Ubuntu 24\.04, ROCm )[0-9.]+(, Python 3\.12 \|)", rf'\g<1>`{os.environ["ROCM_BASE"]}`\g<2>{rocm_short}\g<3>'),
-              ("vLLM row", r"(\| vLLM \| [^|]+ \| )`[^`]+`( \+ [0-9]+ AMD patches \|)", rf"\g<1>`{vllm}`\g<2>"),
-              ("LMCache row", r"(\| LMCache \| [^|]+ \| )`[^`]+` \+ [0-9]+ AMD patches \|", rf"\g<1>`{lmcache}` + {patches} AMD patches |"),
-              ("NIXL row", r"(\| NIXL \| [^|]+ \| )`[^`]+`( \+ `nixl-rocm-ais-mt\.patch` \|)", rf"\g<1>`{nixl}`\g<2>"),
-              ("hsa-snoop row", r"(\| hsa-snoop \| [^|]+ \| )`[^`]+`( \|)", rf"\g<1>`{hsa}`\g<2>"),
-              ("hipFile row", r"(\| hipFile \| ROCm )[0-9.]+( base image \|)", rf"\g<1>{rocm_short}\g<2>"),
-          )
-          for label, pattern, replacement in updates:
-              replace(pattern, replacement, label)
-
-          path.write_text(text)
-          PY
-
-      - name: Verify workflow keeps the current README in sync
-        if: github.event_name == 'pull_request'
-        run: git diff --exit-code -- README.md
-
-      - name: Open PR if README changed
-        if: github.event_name != 'pull_request'
-        uses: peter-evans/create-pull-request@v7
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          commit-message: "docs: sync README shields with Dockerfile versions"
-          title: "docs: sync README version shields with Dockerfile"
-          body: |
-            Automated update: README.md version shields and Stack overview prose
-            synced from `docker/Dockerfile` ARGs.
+          persist-credentials: false
 
-            | Component | Version |
-            | --- | --- |
-            | ROCm | `${{ steps.vers.outputs.rocm }}` |
-            | vLLM | `${{ steps.vers.outputs.vllm }}` |
-            | LMCache | `${{ steps.vers.outputs.lmcache }}` |
-            | NIXL | `${{ steps.vers.outputs.nixl }}` |
-            | hsa-snoop | `${{ steps.vers.outputs.hsa }}` |
+      - name: Check README component metadata
+        run: python3 .github/scripts/sync-readme-versions.py --check
 
-            Generated by the [AIC Update README Shields](${{ github.server_url }}/${{ github.repository }}/actions/workflows/aic-update-readme-shields.yml) workflow.
-          branch: auto/readme-shields
-          labels: documentation
-          delete-branch: true
+      - name: Test README metadata sync
+        run: python3 .github/scripts/test_sync_readme_versions.py
