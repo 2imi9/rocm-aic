@@ -25,7 +25,7 @@ class ReadmeSyncTest(unittest.TestCase):
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         self.root = Path(self.temp_dir.name)
-        (self.root / ".github" / "scripts").mkdir(parents=True)
+        (self.root / "scripts" / "workflows").mkdir(parents=True)
         (self.root / "docker").mkdir()
         shutil.copy2(Path(__file__).with_name(SCRIPT_NAME), self.script)
         shutil.copy2(REPO_ROOT / "docker" / "Dockerfile", self.dockerfile)
@@ -37,7 +37,7 @@ class ReadmeSyncTest(unittest.TestCase):
 
     @property
     def script(self) -> Path:
-        return self.root / ".github" / "scripts" / SCRIPT_NAME
+        return self.root / "scripts" / "workflows" / SCRIPT_NAME
 
     @property
     def dockerfile(self) -> Path:
@@ -128,7 +128,10 @@ class ReadmeSyncTest(unittest.TestCase):
         self.assertIn("vLLM badge, vLLM row", result.stderr)
         self.assertIn("README.md (committed)", result.stdout)
         self.assertIn(stale_ref, result.stdout)
-        self.assertIn("sync-readme-versions.py --write", result.stderr)
+        self.assertIn(
+            "python3 scripts/workflows/sync-readme-versions.py --write",
+            result.stderr,
+        )
         self.assertEqual(self.readme_hash(), before)
 
     def test_write_repairs_all_versions_and_is_idempotent(self) -> None:
@@ -265,6 +268,10 @@ class ReadmeSyncTest(unittest.TestCase):
                 self.assertEqual(result.returncode, 1)
                 self.assertIn(expected, result.stderr)
                 self.assertIn("Restore the named README badge", result.stderr)
+                self.assertIn(
+                    "python3 scripts/workflows/sync-readme-versions.py --write",
+                    result.stderr,
+                )
                 self.assertEqual(self.readme_hash(), before)
                 self.readme.write_text(original, encoding="utf-8")
 

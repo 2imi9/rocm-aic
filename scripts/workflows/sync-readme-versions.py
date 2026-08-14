@@ -240,7 +240,7 @@ def check_or_write(write: bool) -> int:
         )
     )
     print(
-        "Run `python3 .github/scripts/sync-readme-versions.py --write`, "
+        "Run `python3 scripts/workflows/sync-readme-versions.py --write`, "
         "then commit README.md.",
         file=sys.stderr,
     )
@@ -264,7 +264,7 @@ def main() -> int:
         if error.path == README:
             print(
                 "Restore the named README badge or Stack Overview row, then run "
-                "`python3 .github/scripts/sync-readme-versions.py --write`.",
+                "`python3 scripts/workflows/sync-readme-versions.py --write`.",
                 file=sys.stderr,
             )
     return 1

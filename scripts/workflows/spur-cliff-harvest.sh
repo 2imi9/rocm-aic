@@ -21,7 +21,7 @@ set -euo pipefail
 #   secrets.AIC_SPUR_CONTROLLER  — SPUR controller address
 #
 # Usage:
-#   bash .github/scripts/spur-cliff-harvest.sh <full-sha> <run-date-ISO>
+#   bash scripts/workflows/spur-cliff-harvest.sh <full-sha> <run-date-ISO>
 #   # run-date-ISO defaults to $(date +%Y-%m-%d) if omitted
 
 SHA="${1:?usage: $0 <full-sha> [run-date]}"
