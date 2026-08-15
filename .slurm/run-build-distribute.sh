@@ -123,6 +123,8 @@
 #                        (default: <site>&GFX942&NVME -- MI300X + local NVMe).
 #                        Used only when AIC_TEST_NODE is unset.
 #   AIC_TEST_NODE        pin an exact test node via --nodelist  (default: unset)
+#   AIC_TEST_GRES        Slurm GPU resource request for smoke/tiny tests
+#                        (default: gpu:1)
 #   AIC_TEST_TIME        test job time limit               (default: 00:20:00)
 #   AIC_TEST_CPUS        --cpus-per-task for the test job  (default: 8)
 #   AIC_TEST_MEM         --mem for the test job            (default: 32G)
@@ -201,6 +203,8 @@ else
     AIC_BUILD_CONSTRAINT="${AIC_BUILD_CONSTRAINT:-CPUONLY}"
     AIC_TEST_CONSTRAINT="${AIC_TEST_CONSTRAINT:-GFX942&NVME}"
 fi
+AIC_SLURM_ACCOUNT="${AIC_SLURM_ACCOUNT:-}"
+AIC_PIP_WHEELS_DIR="${AIC_PIP_WHEELS_DIR:-}"
 AIC_BUILD_CPUS="${AIC_BUILD_CPUS:-32}"
 AIC_BUILD_TIME="${AIC_BUILD_TIME:-02:00:00}"
 AIC_LOAD_TIME="${AIC_LOAD_TIME:-00:30:00}"
@@ -214,6 +218,7 @@ AIC_CACHE_INSECURE="${AIC_CACHE_INSECURE:-}"
 AIC_TEST_TIME="${AIC_TEST_TIME:-00:45:00}"
 AIC_TEST_CPUS="${AIC_TEST_CPUS:-8}"
 AIC_TEST_MEM="${AIC_TEST_MEM:-32G}"
+AIC_TEST_GRES="${AIC_TEST_GRES:-gpu:1}"
 
 # --- tiny-test: end-to-end serve check with a tiny model ---------------------
 # Brings up the compose MP stack (standalone lmcache + vLLM LMCacheMPConnector)
@@ -339,6 +344,7 @@ PROLOGUE
             --controller="${AIC_SPUR_CONTROLLER}" \
             --job-name="${jobname}" \
             --partition="${AIC_BUILD_PARTITION}" \
+            ${AIC_SLURM_ACCOUNT:+--account="${AIC_SLURM_ACCOUNT}"} \
             --output=/dev/null \
             "$@" \
             "${tmpscript}" 2>&1)" || { rm -f "${tmpscript}"; die "sbatch submission failed: ${submit_out}"; }
@@ -431,6 +437,7 @@ PROLOGUE
         "${_stdbuf[@]}" sbatch --parsable --wait \
             --job-name="${jobname}" \
             --partition="${AIC_BUILD_PARTITION}" \
+            ${AIC_SLURM_ACCOUNT:+--account="${AIC_SLURM_ACCOUNT}"} \
             --output=/dev/null \
             "$@" \
             <<<"${script}" >"${idfile}" &
@@ -551,6 +558,18 @@ cmd_build() {
         _builder_setup="${_pre}${_mkdir}if ! docker buildx inspect ${AIC_BUILDX_BUILDER} >/dev/null 2>&1; then echo '[build] creating buildx builder ${AIC_BUILDX_BUILDER} (docker-container)'; docker buildx create --name ${AIC_BUILDX_BUILDER} --driver docker-container${_cfg_arg} >/dev/null; fi; docker buildx inspect --bootstrap ${AIC_BUILDX_BUILDER} >/dev/null"
     fi
 
+    # pip-wheels build context: supply a local wheel cache dir to skip the 6 GB
+    # torch download.  If AIC_PIP_WHEELS_DIR is unset, fall back to an empty
+    # sentinel dir on shared storage so BuildKit does not try to pull the
+    # non-existent docker.io/library/pip-wheels image.
+    local _pip_wheels_dir="${AIC_PIP_WHEELS_DIR}"
+    if [[ -z "${_pip_wheels_dir}" ]]; then
+        _pip_wheels_dir="${AIC_DAY_DIR}/.empty-pip-wheels"
+        mkdir -p "${_pip_wheels_dir}"
+    fi
+    local _pip_wheels_arg="--build-context pip-wheels=${_pip_wheels_dir}"
+    log "pip-wheels context: ${_pip_wheels_dir}"
+
     # The build + save block runs on ONE node so the saved tarball comes from the
     # image that was just built.  Values are baked in here (not passed via env)
     # to keep it robust regardless of sbatch environment propagation.
@@ -590,6 +609,7 @@ docker buildx build --builder ${AIC_BUILDX_BUILDER} --progress=plain --output ty
     ${_version_build_args} \
     ${_secret_arg} \
     ${_cache_args} \
+    ${_pip_wheels_arg} \
     -f "${AIC_DAY_DIR}/docker/Dockerfile" \
     -t "${AIC_IMAGE}" \
     -t "${latest_ref}" \
@@ -1001,6 +1021,12 @@ SMOKE
 set -euo pipefail
 command -v docker >/dev/null 2>&1 || { echo "\$(hostname): docker not found" >&2; exit 1; }
 echo "[test] host=\$(hostname) docker=\$(docker --version)"
+# Preserve Slurm's single-GPU allocation inside Docker.  SPUR sets
+# ROCR_VISIBLE_DEVICES for --gres=gpu:1; CUDA_VISIBLE_DEVICES is the fallback
+# used by some standard Slurm installations.
+_gpu_visible="\${ROCR_VISIBLE_DEVICES:-\${CUDA_VISIBLE_DEVICES:-0}}"
+_gpu_visible="\${_gpu_visible%%,*}"
+echo "[test] allocated gpu=\${_gpu_visible}"
 # Load the image from the shared tarball only when needed.  A node-local marker
 # records the tarball mtime that was last loaded here; we reload when the tarball
 # is newer (a rebuild happened), when the image is absent, or when forced.  We
@@ -1032,6 +1058,7 @@ docker run --rm \
     --cap-add SYS_PTRACE --cap-add SYS_ADMIN \
     --security-opt seccomp=unconfined \
     \${kmounts} \
+    -e ROCR_VISIBLE_DEVICES="\${_gpu_visible}" \
     -e EXPECT_ARCH='${AIC_ROCM_ARCH}' \
     -v '${smoketest}':/tmp/aic-smoketest.sh:ro \
     --entrypoint /bin/bash \
@@ -1077,7 +1104,9 @@ exit \${img_rc}
 REMOTE
 )"
 
-    local -a _gres_arg=(); [[ "${AIC_SPUR_CLUSTER}" != "1" ]] && _gres_arg=(--gres=gpu:1)
+    # Always reserve a GPU.  Omitting GRES on SPUR lets Slurm co-locate this job
+    # with an existing GPU workload, even though the test launches ROCm code.
+    local -a _gres_arg=(--gres="${AIC_TEST_GRES}")
     _sbatch_run aic-test smoke-test "${remote_script}" \
         "${_sel[@]}" \
         "${_gres_arg[@]}" \
@@ -1114,6 +1143,14 @@ cmd_tiny_test() {
 set -uo pipefail
 command -v docker >/dev/null 2>&1 || { echo "\$(hostname): docker not found" >&2; exit 1; }
 echo "[tiny-test] host=\$(hostname) docker=\$(docker --version)"
+# Preserve the GPU selected by Slurm instead of unconditionally exposing host
+# GPU 0 to both vLLM and LMCache.  A single-GPU GRES normally maps this to 0,
+# while the fallback keeps non-Slurm/manual execution working.
+_gpu_visible="\${ROCR_VISIBLE_DEVICES:-\${CUDA_VISIBLE_DEVICES:-0}}"
+_gpu_visible="\${_gpu_visible%%,*}"
+export GPU="\${_gpu_visible}"
+VLLM_CONTAINER="aic-vllm-gpu\${GPU}"
+echo "[tiny-test] allocated gpu=\${GPU} container=\${VLLM_CONTAINER}"
 
 # Load the image from the shared tarball only when needed (same marker logic as
 # smoke-test): reload when forced, absent, or the tarball is newer.
@@ -1140,7 +1177,6 @@ ensure_compose || { echo "[tiny-test] docker compose unavailable and could not b
 export IMAGE_REF='${AIC_IMAGE}'
 export IMAGE_NAME='${AIC_IMAGE%:*}'
 export ROCM_ARCH='${AIC_ROCM_ARCH}'
-export GPU=0
 export VLLM_MODEL='${AIC_TINY_MODEL}'
 export HF_HOME='${HF_HOME}'
 export HF_TOKEN='${HF_TOKEN:-}'
@@ -1159,7 +1195,10 @@ export LMCACHE_L1_SIZE_GB=4
 export AIC_L2_BACKEND=none
 export VLLM_IPC_MODE=service:lmcache
 export VLLM_PID_MODE=service:lmcache
-export KV_TRANSFER_ARG="--kv-transfer-config '{\"kv_connector\":\"LMCacheMPConnector\",\"kv_role\":\"kv_both\",\"kv_connector_extra_config\":{\"lmcache.mp.host\":\"tcp://localhost\",\"lmcache.mp.port\":6555}}'"
+# PID/IPC namespace sharing is required for HIP IPC, but networking remains
+# isolated per Compose service.  Reach LMCache through Compose DNS rather than
+# vLLM's own loopback interface.
+export KV_TRANSFER_ARG="--kv-transfer-config '{\"kv_connector\":\"LMCacheMPConnector\",\"kv_role\":\"kv_both\",\"kv_connector_extra_config\":{\"lmcache.mp.host\":\"tcp://aic-lmcache\",\"lmcache.mp.port\":6555}}'"
 mkdir -p "\${HF_HOME}" /tmp/aic-tiny-nvme /tmp/aic-tiny-nfs
 
 compose() { docker compose -f '${AIC_DAY_DIR}/docker/docker-compose.yml' "\$@"; }
@@ -1176,7 +1215,7 @@ cleanup() {
     pkill -9 -f 'lmcache server'          2>/dev/null || true
     sleep 2
     timeout 60 compose --profile cache down --remove-orphans --timeout 5 >/dev/null 2>&1 || true
-    for c in aic-vllm-gpu0 aic-lmcache; do timeout 30 docker rm -f "\$c" >/dev/null 2>&1 || true; done
+    for c in "\${VLLM_CONTAINER}" aic-lmcache; do timeout 30 docker rm -f "\$c" >/dev/null 2>&1 || true; done
     rm -rf /tmp/aic-tiny-nvme /tmp/aic-tiny-nfs 2>/dev/null || true
 }
 trap cleanup EXIT
@@ -1190,9 +1229,18 @@ if ! compose --profile cache up -d; then
 fi
 
 # Wait for the vLLM endpoint (weights load + one-time model download).
+# vLLM is intentionally reachable only on the Compose network, so probe from
+# inside its container instead of the Slurm host's loopback interface.
 ready=0
 for _i in \$(seq 1 ${AIC_TINY_READY_TIMEOUT}); do
-    if curl -fsS http://localhost:8000/v1/models >/dev/null 2>&1; then ready=1; break; fi
+    if docker exec "\${VLLM_CONTAINER}" curl -fsS http://127.0.0.1:8000/v1/models >/dev/null 2>&1; then ready=1; break; fi
+    _vllm_state="\$(docker inspect --format '{{.State.Status}}' "\${VLLM_CONTAINER}" 2>/dev/null || true)"
+    if [ "\${_vllm_state}" != "running" ]; then
+        _vllm_exit="\$(docker inspect --format '{{.State.ExitCode}}' "\${VLLM_CONTAINER}" 2>/dev/null || echo unknown)"
+        echo "[tiny-test] FAIL: vLLM exited before readiness (state=\${_vllm_state:-missing}, exit=\${_vllm_exit})" >&2
+        compose logs --tail 80 --no-color vllm 2>&1 | sed 's/^/  [vllm] /'
+        exit 1
+    fi
     sleep 5
 done
 if [ "\${ready}" != "1" ]; then
@@ -1204,7 +1252,7 @@ echo "[tiny-test] endpoint ready; sending one chat completion ..."
 
 # One real completion; assert a NON-EMPTY assistant content came back through the
 # LMCacheMPConnector path.
-resp="\$(curl -fsS http://localhost:8000/v1/chat/completions \
+resp="\$(docker exec "\${VLLM_CONTAINER}" curl -fsS http://127.0.0.1:8000/v1/chat/completions \
     -H 'Content-Type: application/json' \
     -d '{"model":"${AIC_TINY_MODEL}","messages":[{"role":"user","content":"Reply with the single word: pong"}],"max_tokens":16,"temperature":0}' 2>&1)" || {
     echo "[tiny-test] FAIL: completion request failed: \${resp}" >&2; exit 1; }
@@ -1218,7 +1266,8 @@ exit 1
 REMOTE
 )"
 
-    local -a _gres_arg=(); [[ "${AIC_SPUR_CLUSTER}" != "1" ]] && _gres_arg=(--gres=gpu:1)
+    # Always reserve a GPU; see cmd_test for why SPUR must not omit GRES.
+    local -a _gres_arg=(--gres="${AIC_TEST_GRES}")
     _sbatch_run aic-tiny-test tiny-test "${remote_script}" \
         "${_sel[@]}" \
         "${_gres_arg[@]}" \

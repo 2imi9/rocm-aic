@@ -35,3 +35,7 @@ dictionary.dic
 
 # Local AMD cluster environment (see .env.amd.example if it exists)
 .env.amd
+
+# CI artifact staging dir (spur-monitoring-cpu-smoke.sh copies index.html here
+# for upload-artifact / gh-pages deploy; never committed)
+metrics-page/

@@ -24,7 +24,8 @@
 # Targets that are absent for a given run simply show as `down` -- harmless.
 
 global:
-  scrape_interval: 5s        # cliff arms are short; keep resolution high
+  scrape_interval: 15s       # lmcache /metrics can block under load; 15s prevents gaps
+  scrape_timeout: 10s        # must be < scrape_interval; gives lmcache 10s to respond
   evaluation_interval: 15s
   external_labels:
     cluster: AIC
@@ -54,6 +55,16 @@ scrape_configs:
     metrics_path: /metrics
     static_configs:
       - targets: ["aic-lmcache:8080"]
+
+  # LMCache coordinator exporter — polls the coordinator REST API (/instances,
+  # /directory/stats, /quota) and emits Prometheus text format on :9301.
+  # Exposes: lmcache_coordinator_up, _instances_registered, _directory_keys_total,
+  # _directory_placements_total, _instance_l1_keys, _instance_seq_gap,
+  # _quota_usage_bytes, _quota_limit_bytes, _scrape_duration_seconds.
+  - job_name: lmcache_coordinator
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["aic-lmcache-coordinator:9301"]
 
   # NIXL native telemetry exporter (agent_tx_bytes_total, agent_errors_total,
   # ...). Present only when the prometheus-cpp plugin is built into the image and

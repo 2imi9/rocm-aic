@@ -108,7 +108,7 @@ export KV_TRANSFER_ARG
 AIC_METRICS_DIR  ?= $(CURDIR)/logs/prometheus
 AIC_EXPORTERS    ?= 0
 AIC_GRAFANA_PORT ?= 3000
-AIC_GRAFANA_IMAGE ?= grafana/grafana:11.5.2
+AIC_GRAFANA_IMAGE ?= grafana/grafana:13.1.3
 MON_COMPOSE     := $(_COMPOSE_BIN) -f "$(CURDIR)/monitoring/docker-compose.monitoring.yml"
 _MON_PROFILE    := $(if $(filter 1,$(AIC_EXPORTERS)),--profile exporters,)
 export AIC_METRICS_DIR AIC_GRAFANA_PORT AIC_GRAFANA_IMAGE
@@ -470,12 +470,12 @@ venv:
 	@echo "Activate: source $(REPO_ROOT)/.venv/bin/activate"
 
 vllm-reset-test: _check_hf_token _prep_dirs
-	@echo "Starting LMCache L1+L2 retrieval test with small L1 (1 GiB) + NIXL POSIX L2..."
+	@echo "Starting LMCache L1+L2 retrieval test (L1=$(LMCACHE_L1_SIZE_GB)GiB) + NIXL POSIX L2..."
 	@mkdir -p "$(AIC_METRICS_DIR)"
 	PROM_UID="$$(id -u)" PROM_GID="$$(id -g)" \
-	    LMCACHE_L1_SIZE_GB=1 \
+	    LMCACHE_L1_SIZE_GB=$(LMCACHE_L1_SIZE_GB) \
 	    VLLM_EXTRA_ARGS="--enforce-eager $${VLLM_EXTRA_ARGS}" \
-	    AIC_L2_BACKEND=nixl_posix \
+	    AIC_L2_BACKEND=$(AIC_L2_BACKEND) \
 	    $(COMPOSE_CACHE) --profile monitoring up -d
 	@echo "Waiting for vLLM to be healthy..."
 	@for i in $$(seq 1 60); do \
@@ -579,6 +579,7 @@ monitoring-build-exporters:
 	@echo "Run them via:  AIC_EXPORTERS=1 with --profile exporters-fabric, or set"
 	@echo "AIC_NVME_EXPORTER_IMAGE / AIC_RDMA_EXPORTER_IMAGE for the .slurm docker-run path."
 
+
 # ---- Distribute / cliff (Slurm) --------------------------------------------
 # Thin wrappers over .slurm/run-build-distribute.sh (build/push/test on a Slurm
 # node) and `sbatch .slurm/run-cliff.sbatch` (the full cliff sweep).  These
@@ -612,7 +613,7 @@ dist-build-monitoring:         # Pull + save monitoring sidecar images to AIC_IM
 	@# load_image_if_needed call in run-cliff.sbatch picks them up automatically.
 	@set -e; \
 	for img in \
-	    "prom/prometheus:v2.55.1" \
+	    "prom/prometheus:v3.13.2" \
 	    "rocm/device-metrics-exporter:v1.5.1" \
 	; do \
 	    tag="$$(printf '%s' "$$img" | tr '/:' '--').tar.zst"; \
