@@ -274,7 +274,13 @@ gate_ldd() {
 	local target
 	local status=0
 	local output resolved expected
-	local targets
+	local targets torch_lib loader_path
+	torch_lib="$(python3 -c 'import pathlib, torch; print(pathlib.Path(torch.__file__).parent / "lib")')"
+	[[ -d "${torch_lib}" ]] || die "installed Torch library directory is missing: ${torch_lib}"
+	loader_path="${torch_lib}"
+	if [[ -n "${LD_LIBRARY_PATH:-}" ]]; then
+		loader_path="${loader_path}:${LD_LIBRARY_PATH}"
+	fi
 	targets="$(mktemp)"
 	if ! ldd_targets >"${targets}"; then
 		rm -f "${targets}"
@@ -283,7 +289,7 @@ gate_ldd() {
 	while IFS= read -r target; do
 		[[ -n "${target}" ]] || continue
 		[[ -e "${target}" ]] || die "expected shared object is missing: ${target}"
-		if ! output="$(ldd "${target}" 2>&1)"; then
+		if ! output="$(LD_LIBRARY_PATH="${loader_path}" ldd "${target}" 2>&1)"; then
 			echo "ldd failed for ${target}:" >&2
 			echo "${output}" >&2
 			status=1
