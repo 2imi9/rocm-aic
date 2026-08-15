@@ -697,15 +697,15 @@ RUN git clone --depth 1 --branch "${HSA_SNOOP_REF}" "${HSA_SNOOP_GIT_URL}" /app/
 #   SAFETENSORS_FAST_GPU=1        — GPU-accelerated weight loading, faster model startup
 #   HIP_FORCE_DEV_KERNARG=1       — kernel arg handling fix on MI300+/gfx942/gfx950
 #
-# The Mooncake entries are loader-path only: libmooncake_store.so is found by
-# the RPATH of the LMCache extension, but its own dependencies (transfer
-# engine, common, asio, etcd wrapper) are resolved through this path, and the
-# packaged python modules keep their auditwheel-bundled libraries beside them.
+# The Mooncake wheel entries provide the dependencies of its packaged
+# libmooncake_store.so. Deliberately keep the build-only SDK out of this path:
+# LD_LIBRARY_PATH precedes the LMCache extension's RUNPATH, so adding the SDK
+# here would replace the companion-wheel library and mix two glog builds.
 ENV PYTHONUNBUFFERED=1 \
     PYTHONHASHSEED=0 \
     NIXL_PLUGIN_DIR=/opt/nixl/lib/x86_64-linux-gnu/plugins \
     PYTHONPATH=/opt/rocm/share/amd_smi:/opt/nixl/lib/python3/dist-packages \
-    LD_LIBRARY_PATH=/opt/nixl/lib/x86_64-linux-gnu:/opt/nixl/lib:/opt/rocnixl-ucx/lib:/opt/rocm/lib:${MOONCAKE_PREFIX}/lib:${MOONCAKE_PREFIX}/lib64:/usr/local/lib/python3.12/dist-packages/mooncake:/usr/local/lib/python3.12/dist-packages/mooncake_transfer_engine_rocm.libs \
+    LD_LIBRARY_PATH=/opt/nixl/lib/x86_64-linux-gnu:/opt/nixl/lib:/opt/rocnixl-ucx/lib:/opt/rocm/lib:/usr/local/lib/python3.12/dist-packages/mooncake:/usr/local/lib/python3.12/dist-packages/mooncake_transfer_engine_rocm.libs \
     HSA_ENABLE_IPC_MODE_LEGACY=1 \
     SAFETENSORS_FAST_GPU=1 \
     HIP_FORCE_DEV_KERNARG=1
