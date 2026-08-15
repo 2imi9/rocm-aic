@@ -399,20 +399,19 @@ RUN curl -fsSL "https://astral.sh/uv/${UV_VERSION}/install.sh" | sh && \
 # supports ROCm 7.14 compiled kernels.
 #
 # Version alignment (download.pytorch.org/whl/rocm7.2):
-#   torch 2.13.0+rocm7.2  ->  torchvision 0.21.0+rocm7.2
+#   torch 2.13.0+rocm7.2  ->  torchvision 0.28.0+rocm7.2
 # Wheels are pre-downloaded to /opt/pip-cache/wheels on the build host and
 # passed in via --build-context pip-wheels=<dir> to avoid the 6 GB download.
 # The context is mounted read-only and never baked into the image layer.
 # If the build-context is not provided, falls back to the index URL.
 RUN --mount=type=cache,target=/root/.cache/pip \
     --mount=from=pip-wheels,source=.,target=/opt/pip-cache/wheels,ro \
-    if [ -f /opt/pip-cache/wheels/torch-2.13.0+rocm7.2-cp312-cp312-manylinux_2_28_x86_64.whl ]; then \
+    torch_wheel=/opt/pip-cache/wheels/torch-2.13.0+rocm7.2-cp312-cp312-manylinux_2_28_x86_64.whl; \
+    if [ -f "${torch_wheel}" ]; then \
         pip3 install \
-            --find-links /opt/pip-cache/wheels \
-            --prefer-binary \
-            --index-url https://download.pytorch.org/whl/rocm7.2 \
-            "torch==2.13.0+rocm7.2" \
-            "torchvision==0.28.0+rocm7.2"; \
+            "${torch_wheel}" \
+            "torchvision==0.28.0+rocm7.2" \
+            --index-url https://download.pytorch.org/whl/rocm7.2; \
     else \
         pip3 install \
             --timeout 300 \
