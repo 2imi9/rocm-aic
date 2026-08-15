@@ -144,12 +144,35 @@ gate_wheel_install() (
 		PYTHONPATH="${target}" PYTHONNOUSERSITE=1 \
 		python3 - "${target}" <<'PY'
 import importlib
+import importlib.util
 import pathlib
 import sys
 
+import torch  # noqa: F401 — must be imported before lmcache.c_ops
+
 root = pathlib.Path(sys.argv[1]).resolve()
+
+# LMCache installs a compatibility shim at lmcache.c_ops on CPU-only hosts.
+# Load the wheel's extension file directly so this GPU-less build gate still
+# proves that the native artifact itself can be initialized.
+native_path = next((root / "lmcache").glob("c_ops*.so"), None)
+if native_path is None:
+    raise SystemExit("ERROR: clean install is missing c_ops*.so")
+spec = importlib.util.spec_from_file_location("lmcache.c_ops", native_path)
+if spec is None or spec.loader is None:
+    raise SystemExit("ERROR: cannot create an import spec for %s" % native_path)
+native = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = native
+spec.loader.exec_module(native)
+loaded_native_path = pathlib.Path(native.__file__).resolve()
+if not loaded_native_path.is_relative_to(root):
+    raise SystemExit(
+        "ERROR: lmcache.c_ops loaded from %s, outside %s"
+        % (loaded_native_path, root)
+    )
+print("  clean import: lmcache.c_ops -> %s" % loaded_native_path)
+
 for name in (
-    "lmcache.c_ops",
     "lmcache.lmcache_mooncake",
     "mooncake.engine",
     "mooncake.store",
