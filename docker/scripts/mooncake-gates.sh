@@ -210,31 +210,54 @@ PY
 	echo "PASS: c_ops, lmcache_mooncake, mooncake.engine and mooncake.store import"
 }
 
-# --- the MP adapters come from lmcache, not from a bundled fallback ----------
-# lmcache_mp_connector imports its adapters from LMCache and silently falls
-# back to the copy vendored inside the serving engine when that import fails.
-# A wheel that lost its own adapters would still "work" through the fallback,
-# so import the external connector and pin the classes it actually selected.
+# --- the MP adapters needed by the connector come from LMCache ---------------
+# lmcache_mp_connector silently falls back to the copy vendored inside the
+# serving engine if its LMCache adapter imports fail. Import the same module and
+# record types used by that try block so a wheel that lost them fails here. Do
+# not import the connector itself in this GPU-less build gate: vLLM's ROCm
+# platform initialization requires a visible GPU. The hardware smoke imports
+# the connector and checks its selected classes in the real runtime.
 gate_adapter_identity() {
 	python3 <<'PY'
 import importlib
 
 module = importlib.import_module(
-    "lmcache.integration.vllm.lmcache_mp_connector"
+    "lmcache.integration.vllm.vllm_multi_process_adapter"
 )
 expected = "lmcache.integration.vllm.vllm_multi_process_adapter"
+for attr in (
+    "LMCacheMPSchedulerAdapter",
+    "LMCacheMPWorkerAdapter",
+    "LoadStoreOp",
+    "ParallelStrategy",
+    "send_lmcache_request",
+):
+    if not hasattr(module, attr):
+        raise SystemExit("ERROR: %s missing from %s" % (attr, expected))
+
 for attr in ("LMCacheMPSchedulerAdapter", "LMCacheMPWorkerAdapter"):
     cls = getattr(module, attr, None)
-    if cls is None:
-        raise SystemExit("ERROR: %s missing from %s" % (attr, module.__name__))
     if cls.__module__ != expected:
         raise SystemExit(
             "ERROR: %s resolved to %s, expected %s"
             % (attr, cls.__module__, expected)
         )
     print("  adapter: %s -> %s" % (attr, cls.__module__))
+
+custom_types = importlib.import_module("lmcache.v1.multiprocess.custom_types")
+try:
+    allocation_record = custom_types.RequestAllocationRecord
+except AttributeError:
+    try:
+        allocation_record = custom_types.BlockAllocationRecord
+    except AttributeError as error:
+        raise SystemExit(
+            "ERROR: connector-compatible allocation record missing from %s"
+            % custom_types.__name__
+        ) from error
+print("  allocation record: %s" % allocation_record.__name__)
 PY
-	echo "PASS: MP adapters resolve to lmcache modules"
+	echo "PASS: connector MP adapter imports resolve to lmcache modules"
 }
 
 # --- the packaged master binary runs ----------------------------------------
@@ -250,7 +273,7 @@ gate_master() {
 gate_ldd() {
 	local target
 	local status=0
-	local output
+	local output resolved expected
 	local targets
 	targets="$(mktemp)"
 	if ! ldd_targets >"${targets}"; then
@@ -269,6 +292,17 @@ gate_ldd() {
 			grep "not found" <<<"${output}" >&2
 			status=1
 		else
+			if [[ "$(basename "${target}")" == lmcache_mooncake*.so ]]; then
+				resolved="$(awk '$1 ~ /^libmooncake_store\.so/ && $2 == "=>" { print $3; exit }' \
+					<<<"${output}")"
+				expected="$(python3 -c 'import mooncake, pathlib; print(pathlib.Path(mooncake.__path__[0]) / "libmooncake_store.so")')"
+				if [[ -z "${resolved}" || ! -e "${resolved}" || \
+					"$(realpath "${resolved}")" != "$(realpath "${expected}")" ]]; then
+					echo "${output}" >&2
+					die "installed LMCache extension did not resolve the companion-wheel libmooncake_store"
+				fi
+				echo "  companion wheel: $(realpath "${resolved}")"
+			fi
 			echo "  resolved: ${target}"
 		fi
 	done <"${targets}"
