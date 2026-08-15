@@ -623,6 +623,8 @@ async def amain(args: argparse.Namespace) -> int:
                         f"  c={c} per-c warmup: wall={wall:.2f}s "
                         f"errors={len(errs)}"
                     )
+                    if errs:
+                        _ckpt(f"  c={c} per-c warmup first error: {errs[0].error}")
                     # Async-save connectors (kvd v2 chunked-fusion)
                     # return from wait_for_save before chunks land on
                     # disk; back-pressure from the warmup's tail of
