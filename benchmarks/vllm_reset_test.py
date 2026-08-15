@@ -33,6 +33,7 @@ Env overrides (all optional)
   AIC_TEST_ANCHORS      Number of anchor prompts   (default: 10)
   AIC_TEST_FLOOD        Number of flood prompts    (default: 300)
   AIC_TEST_TIMEOUT      Per-request timeout (s)    (default: 120)
+  AIC_TEST_SEED         RNG seed for prompt generation (default: 42)
 """
 
 import json
@@ -176,7 +177,7 @@ def metric_table(snap, label, base=None):
 
 # ── Main test ─────────────────────────────────────────────────────────────────
 def main():
-    random.seed(42)
+    random.seed(int(os.getenv("AIC_TEST_SEED", "42")))
 
     print("=" * 60)
     print("AIC vLLM Reset Test — LMCache L1 + L2 retrieval verification")
@@ -196,7 +197,7 @@ def main():
     dummy = post_json(f"{VLLM}/v1/chat/completions", {
         "model": MODEL, "messages": [{"role": "user", "content": "hi"}],
         "max_tokens": 5, "temperature": 0.0,
-    }, timeout=30)
+    }, timeout=TIMEOUT)
     if dummy is None or "choices" not in dummy:
         log("ERROR: vLLM not responding or model not loaded", prefix="✗ ")
         sys.exit(1)

@@ -105,11 +105,13 @@ export KV_TRANSFER_ARG
 # AIC_METRICS_DIR: Prometheus TSDB dir (bind-mount an NFS path here to explore
 # a run afterward).  AIC_EXPORTERS=1 also launches the containerized node + AMD
 # GPU exporters (for nodes without the host-installed exporter services).
-AIC_METRICS_DIR ?= $(CURDIR)/logs/prometheus
-AIC_EXPORTERS   ?= 0
+AIC_METRICS_DIR  ?= $(CURDIR)/logs/prometheus
+AIC_EXPORTERS    ?= 0
+AIC_GRAFANA_PORT ?= 3000
+AIC_GRAFANA_IMAGE ?= grafana/grafana:13.1.3
 MON_COMPOSE     := $(_COMPOSE_BIN) -f "$(CURDIR)/monitoring/docker-compose.monitoring.yml"
 _MON_PROFILE    := $(if $(filter 1,$(AIC_EXPORTERS)),--profile exporters,)
-export AIC_METRICS_DIR
+export AIC_METRICS_DIR AIC_GRAFANA_PORT AIC_GRAFANA_IMAGE
 
 # ---- Fabric exporters (nvme_exporter / rdma_exporter) ----------------------
 # No published upstream images; we build them from monitoring/*/Dockerfile so the
@@ -241,7 +243,7 @@ _GEN_DATE      := $(shell date +%Y%m%d)
 EXPORT_TARBALL ?= $(CURDIR)/$(EXPORT_PREFIX)-$(_GEN_DATE)-$(_GIT_SHORT_REV)$(_GIT_DIRTY).tar.gz
 
 .PHONY: help ensure-compose build up up-batch up-dev up-monitoring down-monitoring up-gds-l1 up-gds-l1-batch down logs logs-lmcache logs-vllm \
-        ps shell-lmcache shell-vllm restart-vllm restart-lmcache cliff plot venv vllm-reset-test \
+        ps shell-lmcache shell-vllm restart-vllm restart-lmcache cliff plot venv vllm-reset-test stress-grafana \
         monitoring-up monitoring-down monitoring-logs monitoring-build-exporters \
         dist-build dist-build-fast dist-build-exporters dist-build-monitoring dist-push \
         smoke-test smoke-test-fast tiny-test tiny-test-fast install-ci-scripts \
@@ -276,6 +278,8 @@ help:
 	@echo ""
 	@echo "Benchmark targets:"
 	@echo "  make venv              Create/update repo-root .venv with bench+plot deps"
+	@echo "  make stress-grafana    Sustained KVD stress loop for Grafana: ISL=1024, c=1/2/4/8,"
+	@echo "                         5 iters per pass, repeats until ctrl-c — drives L1/L2 panels"
 	@echo "  make vllm-reset-test   Verify LMCache L1+L2 retrieval: small L1 (1GiB), NIXL POSIX L2,"
 	@echo "                         flood to overflow, POST /reset_prefix_cache, confirm L1+L2 hits"
 	@echo "  make cliff             Run KV-cache cliff benchmark, write CSV to $(BENCH_LOGDIR)/results/"
@@ -322,6 +326,8 @@ help:
 	@echo "  make monitoring-build-exporters  Build nvme_exporter + rdma_exporter images"
 	@echo "    AIC_METRICS_DIR=$(AIC_METRICS_DIR)"
 	@echo "    AIC_EXPORTERS=$(AIC_EXPORTERS)  (1 = also launch node + AMD GPU exporters)"
+	@echo "    AIC_GRAFANA_PORT=$(AIC_GRAFANA_PORT)   Grafana host port (default: 3000)"
+	@echo "    AIC_GRAFANA_IMAGE=$(AIC_GRAFANA_IMAGE)"
 	@echo ""
 	@echo "Required env:"
 	@echo "  HF_TOKEN       HuggingFace access token"
@@ -464,12 +470,12 @@ venv:
 	@echo "Activate: source $(REPO_ROOT)/.venv/bin/activate"
 
 vllm-reset-test: _check_hf_token _prep_dirs
-	@echo "Starting LMCache L1+L2 retrieval test with small L1 (1 GiB) + NIXL POSIX L2..."
+	@echo "Starting LMCache L1+L2 retrieval test (L1=$(LMCACHE_L1_SIZE_GB)GiB) + NIXL POSIX L2..."
 	@mkdir -p "$(AIC_METRICS_DIR)"
 	PROM_UID="$$(id -u)" PROM_GID="$$(id -g)" \
-	    LMCACHE_L1_SIZE_GB=1 \
+	    LMCACHE_L1_SIZE_GB=$(LMCACHE_L1_SIZE_GB) \
 	    VLLM_EXTRA_ARGS="--enforce-eager $${VLLM_EXTRA_ARGS}" \
-	    AIC_L2_BACKEND=nixl_posix \
+	    AIC_L2_BACKEND=$(AIC_L2_BACKEND) \
 	    $(COMPOSE_CACHE) --profile monitoring up -d
 	@echo "Waiting for vLLM to be healthy..."
 	@for i in $$(seq 1 60); do \
@@ -479,6 +485,20 @@ vllm-reset-test: _check_hf_token _prep_dirs
 	    [ "$$i" = "60" ] && echo "ERROR: vLLM not healthy after 300s" >&2 && exit 1; \
 	    sleep 5; \
 	done
+	@echo "Clearing vLLM GPU prefix cache..."
+	@docker exec aic-client curl -s -X POST \
+	    http://aic-vllm-gpu0:8000/reset_prefix_cache \
+	    -H 'Content-Type: application/json' -d '{}' | grep -q '"success":true' \
+	    || { echo "ERROR: vLLM cache reset failed" >&2; exit 1; }
+	@echo "Clearing LMCache L1 DRAM cache..."
+	@docker exec aic-client curl -s -X POST \
+	    http://aic-lmcache:8080/cache/clear \
+	    -H 'Content-Type: application/json' \
+	    -d '{"tier":"l1","force":true}' | grep -q '"status":"ok"' \
+	    || { echo "ERROR: LMCache L1 clear failed" >&2; exit 1; }
+	@echo "Resetting LMCache Prometheus counters..."
+	@docker exec aic-client curl -s -X POST \
+	    http://aic-lmcache:8080/metrics/reset > /dev/null
 	$(PYTHON) "$(CURDIR)/benchmarks/vllm_reset_test.py"
 	@echo "Test complete. Run 'make down' to stop the stack."
 
@@ -496,6 +516,37 @@ cliff: _prep_dirs
 		--warmup-iters 1 \
 		--out "$(BENCH_OUT)"
 	@echo "Results written to $(BENCH_OUT)"
+
+# Sustained Grafana stress target: drives L1→L2 spill and L2 reads continuously
+# so all Grafana panels show live activity.  Sized for the running stack:
+#   ISL=1024 shared-prefix=896 → ~14 chunks/request, small enough for the
+#   Qwen/small model, large enough to build up L1 pressure at c=8.
+#   Flood mode: 10 iters × c=8 = 80 request-batches per pass, repeated in a
+#   shell loop so the panels never go idle.  Ctrl-C to stop.
+# Watch: L1 usage gauge, NIXL TX/RX, ISL/OSL row, TTFT, kernel launch rate.
+stress-grafana: _prep_dirs
+	@test -n "$(BENCH_MODEL)" || { \
+		echo "ERROR: set BENCH_MODEL or VLLM_MODEL to the served model name" >&2; exit 1; }
+	@docker inspect aic-client > /dev/null 2>&1 || { \
+		echo "ERROR: aic-client container not running — start with 'make up'" >&2; exit 1; }
+	@echo "Stressing stack for Grafana — watch http://localhost:3000  (ctrl-c to stop)"
+	@echo "  endpoint: http://aic-vllm-gpu0:8000 (via aic-client)"
+	@while true; do \
+		docker exec aic-client \
+			python3 -u benchmarks/run_cliff.py \
+			--endpoint http://aic-vllm-gpu0:8000 \
+			--model "$(BENCH_MODEL)" \
+			--arm kvd_v2 \
+			--isl 1024 \
+			--shared-prefix-tokens 896 \
+			--concurrencies 1,2,4,8 \
+			--iters 5 \
+			--warmup-iters 1 \
+			--post-warmup-sleep-s 2 \
+			--out /logs/manual/results/stress-$$(date +%Y%m%d-%H%M%S).csv; \
+		echo "--- pass complete, restarting in 3s ---"; \
+		sleep 3; \
+	done
 
 plot: _prep_dirs
 	$(PYTHON) "$(CURDIR)/benchmarks/plot_cliff.py" \
@@ -527,6 +578,7 @@ monitoring-build-exporters:
 	@echo "Built $(NVME_EXPORTER_IMAGE) and $(RDMA_EXPORTER_IMAGE)."
 	@echo "Run them via:  AIC_EXPORTERS=1 with --profile exporters-fabric, or set"
 	@echo "AIC_NVME_EXPORTER_IMAGE / AIC_RDMA_EXPORTER_IMAGE for the .slurm docker-run path."
+
 
 # ---- Distribute / cliff (Slurm) --------------------------------------------
 # Thin wrappers over .slurm/run-build-distribute.sh (build/push/test on a Slurm
@@ -561,7 +613,7 @@ dist-build-monitoring:         # Pull + save monitoring sidecar images to AIC_IM
 	@# load_image_if_needed call in run-cliff.sbatch picks them up automatically.
 	@set -e; \
 	for img in \
-	    "prom/prometheus:v2.55.1" \
+	    "prom/prometheus:v3.13.2" \
 	    "rocm/device-metrics-exporter:v1.5.1" \
 	; do \
 	    tag="$$(printf '%s' "$$img" | tr '/:' '--').tar.zst"; \
