@@ -22,6 +22,8 @@
 set -euo pipefail
 
 MOONCAKE_PREFIX="${MOONCAKE_PREFIX:-/opt/mooncake-sdk}"
+# shellcheck disable=SC2016 # $ORIGIN must remain literal in the ELF RPATH.
+WHEEL_MOONCAKE_RPATH='$ORIGIN/../mooncake:$ORIGIN/../mooncake_transfer_engine_rocm.libs'
 
 die() {
 	echo "ERROR: $*" >&2
@@ -51,7 +53,17 @@ for prefix in ("lmcache/c_ops", "lmcache/lmcache_mooncake"):
         raise SystemExit("ERROR: %s is missing %s*.so" % (lmcache_wheel, prefix))
 
 mooncake = members(mooncake_wheel)
-for name in ("mooncake/engine.so", "mooncake/store.so", "mooncake/mooncake_master"):
+mooncake_runtime = (
+    "mooncake/engine.so",
+    "mooncake/store.so",
+    "mooncake/mooncake_master",
+    "mooncake/libmooncake_store.so",
+    "mooncake/libmooncake_common.so",
+    "mooncake/libtransfer_engine.so",
+    "mooncake/libasio.so",
+    "mooncake/libetcd_wrapper.so",
+)
+for name in mooncake_runtime:
     if name not in mooncake:
         raise SystemExit("ERROR: %s is missing %s" % (mooncake_wheel, name))
 
@@ -59,11 +71,90 @@ print("  LMCache native members:")
 for name in sorted(name for name in lmcache if name.endswith(".so")):
     print("    %s" % name)
 print("  Mooncake runtime members:")
-for name in ("mooncake/engine.so", "mooncake/store.so", "mooncake/mooncake_master"):
+for name in mooncake_runtime:
     print("    %s" % name)
 PY
 	echo "PASS: wheel archives contain both LMCache extensions and Mooncake runtime"
 }
+
+# --- published wheels load without the image-only SDK -----------------------
+# The LMCache extension is linked against the SDK while compiling, but the
+# exported wheel must resolve the same library from the companion Mooncake ROCm
+# wheel. Install both archives into an isolated target, hide the SDK, and prove
+# the module path, RPATH and loader result all point at that target.
+gate_wheel_install() (
+	local lmcache_wheel="${1:-}"
+	local mooncake_wheel="${2:-}"
+	local target hidden extension rpath output resolved expected master
+	target="$(mktemp -d)"
+	hidden="${MOONCAKE_PREFIX}.wheel-gate-hidden.$$"
+	[[ -d "${MOONCAKE_PREFIX}" ]] || die "Mooncake SDK not found: ${MOONCAKE_PREFIX}"
+	[[ ! -e "${hidden}" ]] || die "temporary SDK path already exists: ${hidden}"
+	# shellcheck disable=SC2329 # Invoked by the EXIT trap below.
+	cleanup() {
+		if [[ -e "${hidden}" && ! -e "${MOONCAKE_PREFIX}" ]]; then
+			mv "${hidden}" "${MOONCAKE_PREFIX}"
+		fi
+		rm -rf "${target}"
+	}
+	trap cleanup EXIT
+
+	python3 -m pip install --no-cache-dir --no-deps --target "${target}" \
+		"${mooncake_wheel}" "${lmcache_wheel}"
+	mv "${MOONCAKE_PREFIX}" "${hidden}"
+
+	extension="$(find "${target}/lmcache" -maxdepth 1 -type f \
+		-name 'lmcache_mooncake*.so' -print -quit)"
+	[[ -n "${extension}" ]] || die "clean install is missing lmcache_mooncake*.so"
+	rpath="$(patchelf --print-rpath "${extension}")"
+	[[ "${rpath}" == "${WHEEL_MOONCAKE_RPATH}" ]] || \
+		die "LMCache Mooncake RPATH is ${rpath}, expected ${WHEEL_MOONCAKE_RPATH}"
+
+	output="$(ldd "${extension}" 2>&1)" || {
+		echo "${output}" >&2
+		die "ldd failed for clean-installed LMCache Mooncake extension"
+	}
+	if grep -q "not found" <<<"${output}"; then
+		echo "${output}" >&2
+		die "clean-installed LMCache Mooncake extension has unresolved libraries"
+	fi
+	resolved="$(awk '$1 ~ /^libmooncake_store\.so/ && $2 == "=>" { print $3; exit }' \
+		<<<"${output}")"
+	[[ -n "${resolved}" && -e "${resolved}" ]] || {
+		echo "${output}" >&2
+		die "LMCache extension did not resolve an existing libmooncake_store"
+	}
+	expected="${target}/mooncake/libmooncake_store.so"
+	resolved="$(realpath "${resolved}")"
+	expected="$(realpath "${expected}")"
+	[[ "${resolved}" == "${expected}" ]] || {
+		echo "${output}" >&2
+		die "LMCache extension resolved libmooncake_store outside the companion wheel"
+	}
+
+	PYTHONPATH="${target}" PYTHONNOUSERSITE=1 python3 - "${target}" <<'PY'
+import importlib
+import pathlib
+import sys
+
+root = pathlib.Path(sys.argv[1]).resolve()
+for name in (
+    "lmcache.c_ops",
+    "lmcache.lmcache_mooncake",
+    "mooncake.engine",
+    "mooncake.store",
+):
+    module = importlib.import_module(name)
+    path = pathlib.Path(module.__file__).resolve()
+    if not path.is_relative_to(root):
+        raise SystemExit("ERROR: %s loaded from %s, outside %s" % (name, path, root))
+    print("  clean import: %s -> %s" % (name, path))
+PY
+	master="${target}/mooncake/mooncake_master"
+	[[ -x "${master}" ]] || die "clean install is missing executable mooncake_master"
+	"${master}" --version
+	echo "PASS: published LMCache and Mooncake wheels load without the image SDK"
+)
 
 # --- imports ----------------------------------------------------------------
 gate_imports() {
@@ -214,7 +305,10 @@ main() {
 	local command="${1:-}"
 	shift || true
 	case "${command}" in
-	wheels) gate_wheels "$@" ;;
+	wheels)
+		gate_wheels "$@"
+		gate_wheel_install "$@"
+		;;
 	runtime) gate_runtime ;;
 	*) die "usage: $0 {wheels <lmcache-wheel> <mooncake-wheel>|runtime}" ;;
 	esac
