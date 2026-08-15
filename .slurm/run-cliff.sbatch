@@ -569,10 +569,10 @@ if [[ "${AIC_EXPORTERS}" != "0" ]]; then
     _b="$(printf '%s' "${_t}" | tr '/:' '--')"
     load_image_if_needed "${_t}" "${AIC_IMAGE_DIR}/${_b}.tar.*" && export AIC_AMDGPU_EXPORTER_IMAGE="${_t}"
   fi
-  # Prometheus (prom/prometheus:v2.55.1).  Pre-pull avoids 10+ min Docker Hub
+  # Prometheus (prom/prometheus:v3.13.2).  Pre-pull avoids 10+ min Docker Hub
   # download on fresh nodes; load_image_if_needed is a no-op when already present.
   if [[ -z "${AIC_PROM_IMAGE:-}" ]]; then
-    _t="prom/prometheus:v2.55.1"
+    _t="prom/prometheus:v3.13.2"
     _b="$(printf '%s' "${_t}" | tr '/:' '--')"
     load_image_if_needed "${_t}" "${AIC_IMAGE_DIR}/${_b}.tar.*" || true
   fi
@@ -794,7 +794,9 @@ run_arm_kvd() { # $1=mode(nvme|gds) $2=out_csv
   # falsely trigger recovery. Real crashes will still be detected once vLLM stops
   # responding entirely (the ZMQ channel closes cleanly on process exit).
   local _hb="${LMCACHE_HEARTBEAT_INTERVAL:-900}"
-  export KV_TRANSFER_ARG="--kv-transfer-config '{\"kv_connector\":\"LMCacheMPConnector\",\"kv_role\":\"kv_both\"${_fp},\"kv_connector_extra_config\":{\"lmcache.mp.host\":\"tcp://localhost\",\"lmcache.mp.port\":${LMCACHE_PORT},\"lmcache.mp.heartbeat_interval\":${_hb}}}'"
+  # Sharing lmcache's PID/IPC namespaces does not share its network namespace;
+  # resolve the peer through the Compose network, as the interactive stack does.
+  export KV_TRANSFER_ARG="--kv-transfer-config '{\"kv_connector\":\"LMCacheMPConnector\",\"kv_role\":\"kv_both\"${_fp},\"kv_connector_extra_config\":{\"lmcache.mp.host\":\"tcp://aic-lmcache\",\"lmcache.mp.port\":${LMCACHE_PORT},\"lmcache.mp.heartbeat_interval\":${_hb}}}'"
   export VLLM_IPC_MODE=service:lmcache # join lmcache IPC ns for cross-container HIP IPC
   export VLLM_PID_MODE=service:lmcache # share lmcache PID ns for cross-container HIP IPC
 
@@ -884,7 +886,7 @@ declare -A STATUS
 # Pre-pull the Prometheus image so start_monitoring doesn't block on a Docker Hub
 # download (prom/prometheus is ~75 MB; on a cold node this adds 10+ minutes before
 # the first arm starts).  docker pull is a no-op when the image is already present.
-_prom_img="${AIC_PROM_IMAGE:-prom/prometheus:v2.55.1}"
+_prom_img="${AIC_PROM_IMAGE:-prom/prometheus:v3.13.2}"
 log "pre-pulling ${_prom_img} (no-op if cached)..."
 docker pull "${_prom_img}" >/dev/null 2>&1 && log "  ${_prom_img}: ready" \
     || log "  WARN: pull failed for ${_prom_img} (will try again at compose up)"

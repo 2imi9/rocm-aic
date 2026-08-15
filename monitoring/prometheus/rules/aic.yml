@@ -20,6 +20,17 @@ groups:
             ) * 0 + 1
           )
 
+      # vLLM KV cache blocks currently in use.
+      # num_gpu_blocks is a string label on vllm:cache_config_info (value=1), not a
+      # numeric metric, so we can't compute this in pure PromQL. The Grafana panel
+      # uses a calculateField transform (Value × num_gpu_blocks label) instead.
+      # This rule records the usage ratio joined with block metadata for alerting use.
+      - record: aic:vllm:kv_cache_usage_with_blocks
+        expr: |
+          vllm:kv_cache_usage_perc{job="vllm"}
+          * on(instance, engine, job) group_left(num_gpu_blocks)
+          vllm:cache_config_info{job="vllm"}
+
       # RDMA port key: instance@device@port, from the yuuki-style rdma_exporter.
       - record: aic:rdma:key
         expr: |

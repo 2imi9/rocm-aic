@@ -24,6 +24,7 @@ AIC_SHARED_NFS="${AIC_SHARED_NFS:?AIC_SHARED_NFS must be set (e.g. via GitHub re
 AIC_SPUR_CONTROLLER="${AIC_SPUR_CONTROLLER:?AIC_SPUR_CONTROLLER must be set (e.g. via GitHub repo variable)}"
 AIC_CI_STORAGE_ROOT="${AIC_CI_STORAGE_ROOT:-}"
 AIC_SMOKE_USE_REGISTRY="${AIC_SMOKE_USE_REGISTRY:-0}"
+AIC_SLURM_ACCOUNT="${AIC_SLURM_ACCOUNT:-}"
 REPO="https://github.com/ROCm/rocm-aic.git"
 
 ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=4 "${AIC_SPUR_HOST}" env \
@@ -34,6 +35,7 @@ ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=4 "${AIC_SPUR_HOST}" env \
     AIC_CI_STORAGE_ROOT="${AIC_CI_STORAGE_ROOT}" \
     AIC_SPUR_CONTROLLER="${AIC_SPUR_CONTROLLER}" \
     SPUR_CONTROLLER_ADDR="${AIC_SPUR_CONTROLLER}" \
+    AIC_SLURM_ACCOUNT="${AIC_SLURM_ACCOUNT}" \
     AIC_SMOKE_USE_REGISTRY="${AIC_SMOKE_USE_REGISTRY}" \
     bash << 'REMOTE'
 set -euo pipefail
@@ -42,7 +44,7 @@ SHORT="${SHA:0:7}"
 WORKDIR="$HOME/Projects/rocm-aic.${SHORT}"
 CI_STORAGE_ROOT="${AIC_CI_STORAGE_ROOT:-$HOME/Projects/rocm-aic-ci}"
 TARBALL_DIR="${CI_STORAGE_ROOT}/images/aic-ci-${SHORT}"
-METRICS_PAGE_DIR="${CI_STORAGE_ROOT}/metrics-page-${SHORT}"
+AIC_METRICS_PAGE_DIR="${AIC_SHARED_NFS}/rocm-aic/metrics-pages-${SHORT}"
 HF_HOME="${AIC_SHARED_NFS}/huggingface"
 
 cleanup() {
@@ -81,7 +83,7 @@ set -euo pipefail
 
 WORKDIR="${1}"
 AIC_IMAGE="${2}"
-METRICS_PAGE_DIR="${3}"
+AIC_METRICS_PAGE_DIR="${3}"
 SHA="${4}"
 TARBALL_DIR="${5}"
 AIC_SMOKE_USE_REGISTRY="${6:-0}"
@@ -90,8 +92,8 @@ SHORT="${SHA:0:7}"
 
 MON_DIR="${WORKDIR}/monitoring"
 EMULATOR_COMPOSE="${WORKDIR}/docker/docker-compose.emulator.yml"
-METRICS_DIR="${METRICS_PAGE_DIR}/prom-tsdb"
-mkdir -p "${METRICS_DIR}" "${METRICS_PAGE_DIR}"
+METRICS_DIR="${AIC_METRICS_PAGE_DIR}/prom-tsdb"
+mkdir -p "${METRICS_DIR}" "${AIC_METRICS_PAGE_DIR}"
 
 # ---------------------------------------------------------------------------
 # Load or pull the rocm-aic image (docker is on the compute node, not the head node)
@@ -230,10 +232,10 @@ python3 "${WORKDIR}/monitoring/scripts/metrics_to_html.py" \
     "${METRICS_ARGS[@]}" \
     --sha "${SHA}" \
     --title "AIC Prometheus Metrics Reference" \
-    > "${METRICS_PAGE_DIR}/index.html"
+    > "${AIC_METRICS_PAGE_DIR}/index.html"
 
-echo "=== Metrics page written to ${METRICS_PAGE_DIR}/index.html ==="
-wc -l "${METRICS_PAGE_DIR}/index.html"
+echo "=== Metrics page written to ${AIC_METRICS_PAGE_DIR}/index.html ==="
+wc -l "${AIC_METRICS_PAGE_DIR}/index.html"
 
 SRUN_BODY
 
@@ -241,16 +243,19 @@ chmod +x "${SRUN_SCRIPT}"
 
 echo "=== Submitting CPU-only srun job ==="
 srun \
+    --controller="${SPUR_CONTROLLER_ADDR}" \
+    ${AIC_SLURM_ACCOUNT:+--account="${AIC_SLURM_ACCOUNT}"} \
     --nodes=1 \
     --ntasks=1 \
     --cpus-per-task=8 \
     --mem=16G \
     --time=00:30:00 \
     --partition=amd-spur \
+    --gres= \
     bash "${SRUN_SCRIPT}" \
         "${WORKDIR}" \
         "${AIC_IMAGE}" \
-        "${METRICS_PAGE_DIR}" \
+        "${AIC_METRICS_PAGE_DIR}" \
         "${SHA}" \
         "${TARBALL_DIR}" \
         "${AIC_SMOKE_USE_REGISTRY}" \
@@ -262,14 +267,13 @@ REMOTE
 # ---------------------------------------------------------------------------
 # Copy metrics page artifact back to the runner working directory
 # ---------------------------------------------------------------------------
-SPUR_USER="$(ssh -o ServerAliveInterval=30 "${AIC_SPUR_HOST}" id -un)"
-REMOTE_METRICS_PAGE_DIR="${AIC_SHARED_NFS}/${SPUR_USER}/metrics-page-${SHORT}"
+AIC_REMOTE_METRICS_PAGE_DIR="${AIC_SHARED_NFS}/rocm-aic/metrics-pages-${SHORT}"
 
 echo "=== Copying metrics page to runner ==="
 mkdir -p metrics-page
 scp -o ServerAliveInterval=30 \
-    "${AIC_SPUR_HOST}:${REMOTE_METRICS_PAGE_DIR}/index.html" \
+    "${AIC_SPUR_HOST}:${AIC_REMOTE_METRICS_PAGE_DIR}/index.html" \
     metrics-page/index.html
-ssh -o ServerAliveInterval=30 "${AIC_SPUR_HOST}" rm -rf "${REMOTE_METRICS_PAGE_DIR}"
+ssh -o ServerAliveInterval=30 "${AIC_SPUR_HOST}" rm -rf "${AIC_REMOTE_METRICS_PAGE_DIR}"
 
 echo "CPU monitoring smoke test passed for ${SHORT}"
