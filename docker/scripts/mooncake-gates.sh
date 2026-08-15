@@ -86,6 +86,7 @@ gate_wheel_install() (
 	local lmcache_wheel="${1:-}"
 	local mooncake_wheel="${2:-}"
 	local target hidden extension rpath output resolved expected master
+	local torch_lib external_ld_library_path
 	target="$(mktemp -d)"
 	hidden="${MOONCAKE_PREFIX}.wheel-gate-hidden.$$"
 	[[ -d "${MOONCAKE_PREFIX}" ]] || die "Mooncake SDK not found: ${MOONCAKE_PREFIX}"
@@ -102,6 +103,13 @@ gate_wheel_install() (
 	python3 -m pip install --no-cache-dir --no-deps --target "${target}" \
 		"${mooncake_wheel}" "${lmcache_wheel}"
 	mv "${MOONCAKE_PREFIX}" "${hidden}"
+	# Torch and the ROCm runtime are documented host prerequisites, not contents
+	# of either wheel. Expose only those external loader roots; Mooncake itself
+	# must still resolve through the wheel-relative RPATH checked below.
+	torch_lib="$(python3 -c 'import pathlib, torch; print(pathlib.Path(torch.__file__).parent / "lib")')"
+	[[ -d "${torch_lib}" ]] || die "installed Torch library directory is missing: ${torch_lib}"
+	[[ -e /opt/rocm/lib/libamdhip64.so.7 ]] || die "ROCm runtime library is missing: libamdhip64.so.7"
+	external_ld_library_path="${torch_lib}:/opt/rocm/lib"
 
 	extension="$(find "${target}/lmcache" -maxdepth 1 -type f \
 		-name 'lmcache_mooncake*.so' -print -quit)"
@@ -110,7 +118,7 @@ gate_wheel_install() (
 	[[ "${rpath}" == "${WHEEL_MOONCAKE_RPATH}" ]] || \
 		die "LMCache Mooncake RPATH is ${rpath}, expected ${WHEEL_MOONCAKE_RPATH}"
 
-	output="$(ldd "${extension}" 2>&1)" || {
+	output="$(LD_LIBRARY_PATH="${external_ld_library_path}" ldd "${extension}" 2>&1)" || {
 		echo "${output}" >&2
 		die "ldd failed for clean-installed LMCache Mooncake extension"
 	}
@@ -132,7 +140,9 @@ gate_wheel_install() (
 		die "LMCache extension resolved libmooncake_store outside the companion wheel"
 	}
 
-	PYTHONPATH="${target}" PYTHONNOUSERSITE=1 python3 - "${target}" <<'PY'
+	LD_LIBRARY_PATH="${external_ld_library_path}" \
+		PYTHONPATH="${target}" PYTHONNOUSERSITE=1 \
+		python3 - "${target}" <<'PY'
 import importlib
 import pathlib
 import sys
@@ -152,7 +162,7 @@ for name in (
 PY
 	master="${target}/mooncake/mooncake_master"
 	[[ -x "${master}" ]] || die "clean install is missing executable mooncake_master"
-	"${master}" --version
+	LD_LIBRARY_PATH="${external_ld_library_path}" "${master}" --version
 	echo "PASS: published LMCache and Mooncake wheels load without the image SDK"
 )
 
