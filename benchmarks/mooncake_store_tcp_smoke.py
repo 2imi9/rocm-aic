@@ -19,6 +19,8 @@ The probe covers aligned and unaligned payloads, a missing key, and deletion.
 It does not exercise RDMA, GPU buffers, LMCache, or vLLM.
 
 ``--lease-wait`` must exceed the master's KV lease TTL so removal can succeed.
+Its default includes a 0.5-second margin over Mooncake's 10-second default;
+override it when the master uses a different TTL.
 """
 
 from __future__ import annotations
@@ -28,6 +30,10 @@ import json
 import multiprocessing as mp
 import time
 import traceback
+
+
+DEFAULT_MASTER_LEASE_TTL_S = 10.0
+DEFAULT_LEASE_WAIT_S = DEFAULT_MASTER_LEASE_TTL_S + 0.5
 
 
 def require(condition: bool, message: str) -> None:
@@ -163,8 +169,9 @@ def main() -> int:
     parser.add_argument(
         "--lease-wait",
         type=float,
-        default=5.2,
-        help="seconds to wait before removal; must exceed the master lease TTL",
+        default=DEFAULT_LEASE_WAIT_S,
+        help="seconds to wait before removal; must exceed the master lease TTL "
+        f"(default: {DEFAULT_LEASE_WAIT_S:g}s for Mooncake's 10s default TTL)",
     )
     parser.add_argument("--timeout", type=float, default=30.0)
     args = parser.parse_args()
