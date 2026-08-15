@@ -74,6 +74,9 @@ ARG GO_AMD64_SHA256=00859d7bd6defe8bf84d9db9e57b9a4467b2887c18cd93ae7460e713db77
 # see the NIXL isolation probe in stage 6.
 ARG MOONCAKE_PREFIX=/opt/mooncake-sdk
 
+# An optional named context with this name overrides the empty default stage.
+FROM scratch AS pip-wheels
+
 # ----- Stage M. Mooncake (source build at the pinned commit) -----------------
 # Independent builder on the same ROCm base.  Only ${MOONCAKE_PREFIX} and the
 # built wheel cross into the main stage, so this stage's system-wide side

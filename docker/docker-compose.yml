@@ -111,7 +111,8 @@ services:
       context: ..
       dockerfile: docker/Dockerfile
       additional_contexts:
-        pip-wheels: ${AIC_PIP_WHEELS_DIR:-/opt/pip-cache/wheels}
+        # Use a small tracked directory when no host wheel cache is configured.
+        pip-wheels: ${AIC_PIP_WHEELS_DIR:-./constraints}
       args:
         AIC_VERSION:
         ROCM_VERSION:
