@@ -290,7 +290,7 @@ ARG HSA_SNOOP_GIT_URL=https://github.com/sbates130272/hsa-snoop.git
 ARG HSA_SNOOP_REF=v1.0.0
 
 # LMCache: upstream repo, pinned to the v0.5.3 release tag.
-# All 12 AMD patches in patches/lmcache/ apply cleanly against this tag.
+# All 16 AMD patches in patches/lmcache/ apply cleanly against this tag.
 # Note: LMCache v0.5.2+ is required for vLLM >= 0.26.0.
 ARG LMCACHE_GIT_URL=https://github.com/LMCache/LMCache.git
 ARG LMCACHE_REF=v0.5.3
@@ -493,7 +493,8 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         liburing-dev \
         libxxhash-dev \
         libyaml-cpp-dev \
-        libzstd-dev
+        libzstd-dev \
+        patchelf
 
 COPY --from=mooncake-build ${MOONCAKE_PREFIX} ${MOONCAKE_PREFIX}
 COPY --from=mooncake-build /wheels/ /wheels/
@@ -556,8 +557,12 @@ RUN cd /app/LMCache && \
 #
 # MOONCAKE_INCLUDE_DIR lists the same four include roots Mooncake's own CMake
 # puts on the store library's compile line (the SDK root, plus the vendored
-# cachelib allocator and its two header roots); MOONCAKE_LIB_DIR provides both
-# -L and the extension's RPATH.
+# cachelib allocator and its two header roots); MOONCAKE_LIB_DIR provides the
+# build-time link directory. MOONCAKE_RUNTIME_LIB_DIR is deliberately separate:
+# the published LMCache wheel resolves libmooncake_store from the companion
+# Mooncake ROCm wheel via paths relative to site-packages, never from the
+# image-only SDK path.
+# hadolint ignore=SC2016
 RUN --mount=type=cache,target=/root/.cache/pip \
     mkdir -p /wheels && \
     printf '%s\n' "${ROCM_ARCH%%;*}" > /etc/rocm_target.lst && \
@@ -570,6 +575,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
         BUILD_WITH_MOONCAKE=1 \
         MOONCAKE_INCLUDE_DIR="${MOONCAKE_PREFIX}/include;${MOONCAKE_PREFIX}/include/cachelib_memory_allocator;${MOONCAKE_PREFIX}/include/cachelib_memory_allocator/include;${MOONCAKE_PREFIX}/include/cachelib_memory_allocator/fake_include" \
         MOONCAKE_LIB_DIR="${MOONCAKE_PREFIX}/lib" \
+        MOONCAKE_RUNTIME_LIB_DIR='$ORIGIN/../mooncake;$ORIGIN/../mooncake_transfer_engine_rocm.libs' \
         ROCM_TARGET_LST=/etc/rocm_target.lst \
         MAX_JOBS="${BUILD_JOBS:-$(nproc)}" \
         CMAKE_BUILD_PARALLEL_LEVEL="${BUILD_JOBS:-$(nproc)}" \
@@ -591,7 +597,17 @@ RUN chmod +x /usr/local/bin/aic-mooncake-gates.sh && \
     /usr/local/bin/aic-mooncake-gates.sh wheels \
         "${lmcache_wheels[0]}" "${mooncake_wheels[0]}"
 
-RUN uv pip install --system --no-cache --reinstall /wheels/lmcache-*.whl
+# Resolve LMCache's declared dependencies while keeping the existing ROCm
+# torch pairing, then reinstall only the canonical local artifact. Passing
+# --reinstall to the resolving command would replace ROCm torch with PyPI's
+# CUDA stack because LMCache intentionally leaves its torch requirement open.
+RUN --mount=type=cache,target=/root/.cache/uv \
+    printf 'torch==2.13.0+rocm7.2\ntorchvision==0.28.0+rocm7.2\n' > /tmp/lmcache-constraints.txt && \
+    uv pip install --system --no-cache \
+        --constraint /tmp/lmcache-constraints.txt \
+        /wheels/lmcache-*.whl && \
+    uv pip install --system --no-cache --reinstall --no-deps \
+        /wheels/lmcache-*.whl
 
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system "matplotlib>=3.8,<4"
