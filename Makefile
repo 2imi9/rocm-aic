@@ -108,7 +108,7 @@ export KV_TRANSFER_ARG
 AIC_METRICS_DIR  ?= $(CURDIR)/logs/prometheus
 AIC_EXPORTERS    ?= 0
 AIC_GRAFANA_PORT ?= 3000
-AIC_GRAFANA_IMAGE ?= grafana/grafana:11.5.2
+AIC_GRAFANA_IMAGE ?= grafana/grafana:13.1.3
 MON_COMPOSE     := $(_COMPOSE_BIN) -f "$(CURDIR)/monitoring/docker-compose.monitoring.yml"
 _MON_PROFILE    := $(if $(filter 1,$(AIC_EXPORTERS)),--profile exporters,)
 export AIC_METRICS_DIR AIC_GRAFANA_PORT AIC_GRAFANA_IMAGE
@@ -613,7 +613,7 @@ dist-build-monitoring:         # Pull + save monitoring sidecar images to AIC_IM
 	@# load_image_if_needed call in run-cliff.sbatch picks them up automatically.
 	@set -e; \
 	for img in \
-	    "prom/prometheus:v2.55.1" \
+	    "prom/prometheus:v3.13.2" \
 	    "rocm/device-metrics-exporter:v1.5.1" \
 	; do \
 	    tag="$$(printf '%s' "$$img" | tr '/:' '--').tar.zst"; \
