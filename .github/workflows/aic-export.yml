@@ -83,7 +83,7 @@ jobs:
       - name: Validate release notes renderer
         run: |
           set -euo pipefail
-          renderer=.github/scripts/render-release-notes.sh
+          renderer=.github/scripts/workflows/render-release-notes.sh
           args=(docker/Dockerfile v-test deadbeef gfx942 rocm-aic ROCm/rocm-aic)
           fixtures="$(mktemp -d)"
           trap 'rm -rf "${fixtures}"' EXIT
