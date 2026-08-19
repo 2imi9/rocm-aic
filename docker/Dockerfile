@@ -145,8 +145,10 @@ RUN git init /src/Mooncake && \
     git -C /src/Mooncake fetch --filter=blob:none --depth 1 \
         origin "${MOONCAKE_FETCH_REF}" && \
     git -C /src/Mooncake checkout --detach FETCH_HEAD && \
-    test "$(git -C /src/Mooncake rev-parse HEAD)" = "${MOONCAKE_REF}" \
-        || { echo "ERROR: Mooncake checkout is not ${MOONCAKE_REF}" >&2; exit 1; }
+    if [ "$(git -C /src/Mooncake rev-parse HEAD)" != "${MOONCAKE_REF}" ]; then \
+        echo "ERROR: Mooncake checkout is not ${MOONCAKE_REF}" >&2; \
+        exit 1; \
+    fi
 
 # Upstream's own dependency installer: system packages, git submodules
 # (pybind11, yalantinglibs) and the yalantinglibs install into /usr/local.
