@@ -157,8 +157,10 @@ ifeq ($(AIC_SPUR_CLUSTER),1)
 export AIC_SPUR_CLUSTER
 export AIC_SPUR_CONTROLLER  ?= $(SPUR_CONTROLLER_ADDR)
 export AIC_IMAGE_DIR        ?= $(AIC_SHARED_NFS)/rocm-aic/images
-# Cache export is best-effort, so SPUR runners can share one BuildKit cache.
-export AIC_CACHE_DIR        ?= $(AIC_SHARED_NFS)/rocm-aic/images/buildcache
+# Per-user BuildKit cache on the shared NFS volume: $HOME is small and quota'd
+# on SPUR, and a cache shared across users is not writable by all of them.
+# Cache export is best-effort, so a user's concurrent builds still share it.
+export AIC_CACHE_DIR        ?= $(AIC_SHARED_NFS)/$(USER)/buildcache
 # SPUR nodes have 8x NVMe drives combined into a single LVM at /mnt/m2m_nobackup.
 # Use override (not ?=) so these win over the top-level ?= defaults set earlier.
 # HF_HOME points to the cluster-wide model cache since /scratch does not exist
