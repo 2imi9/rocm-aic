@@ -123,8 +123,9 @@
 #                        (default: <site>&GFX942&NVME -- MI300X + local NVMe).
 #                        Used only when AIC_TEST_NODE is unset.
 #   AIC_TEST_NODE        pin an exact test node via --nodelist  (default: unset)
-#   AIC_TEST_GRES        Slurm GPU resource request for smoke/tiny tests
+#   AIC_TEST_GRES        Standard-Slurm GPU GRES request for smoke/tiny tests
 #                        (default: gpu:1)
+#   AIC_TEST_GPUS        SPUR GPU request for smoke/tiny tests (default: 1)
 #   AIC_TEST_TIME        test job time limit               (default: 00:20:00)
 #   AIC_TEST_CPUS        --cpus-per-task for the test job  (default: 8)
 #   AIC_TEST_MEM         --mem for the test job            (default: 32G)
@@ -219,6 +220,7 @@ AIC_TEST_TIME="${AIC_TEST_TIME:-00:45:00}"
 AIC_TEST_CPUS="${AIC_TEST_CPUS:-8}"
 AIC_TEST_MEM="${AIC_TEST_MEM:-32G}"
 AIC_TEST_GRES="${AIC_TEST_GRES:-gpu:1}"
+AIC_TEST_GPUS="${AIC_TEST_GPUS:-1}"
 
 # --- tiny-test: end-to-end serve check with a tiny model ---------------------
 # Brings up the compose MP stack (standalone lmcache + vLLM LMCacheMPConnector)
@@ -1123,12 +1125,17 @@ exit \${img_rc}
 REMOTE
 )"
 
-    # Always reserve a GPU.  Omitting GRES on SPUR lets Slurm co-locate this job
-    # with an existing GPU workload, even though the test launches ROCm code.
-    local -a _gres_arg=(--gres="${AIC_TEST_GRES}")
+    # Always reserve a GPU. SPUR requires --gpus; standard Slurm deployments
+    # retain the configurable GRES request.
+    local -a _gpu_request
+    if [[ "${AIC_SPUR_CLUSTER}" == "1" ]]; then
+        _gpu_request=(--gpus="${AIC_TEST_GPUS}")
+    else
+        _gpu_request=(--gres="${AIC_TEST_GRES}")
+    fi
     _sbatch_run aic-test smoke-test "${remote_script}" \
         "${_sel[@]}" \
-        "${_gres_arg[@]}" \
+        "${_gpu_request[@]}" \
         --nodes=1 --ntasks=1 \
         --cpus-per-task="${AIC_TEST_CPUS}" --mem="${AIC_TEST_MEM}" \
         --time="${AIC_TEST_TIME}"
@@ -1287,11 +1294,16 @@ exit 1
 REMOTE
 )"
 
-    # Always reserve a GPU; see cmd_test for why SPUR must not omit GRES.
-    local -a _gres_arg=(--gres="${AIC_TEST_GRES}")
+    # Always reserve a GPU; see cmd_test for the SPUR-specific request form.
+    local -a _gpu_request
+    if [[ "${AIC_SPUR_CLUSTER}" == "1" ]]; then
+        _gpu_request=(--gpus="${AIC_TEST_GPUS}")
+    else
+        _gpu_request=(--gres="${AIC_TEST_GRES}")
+    fi
     _sbatch_run aic-tiny-test tiny-test "${remote_script}" \
         "${_sel[@]}" \
-        "${_gres_arg[@]}" \
+        "${_gpu_request[@]}" \
         --nodes=1 --ntasks=1 \
         --cpus-per-task="${AIC_TINY_CPUS}" --mem="${AIC_TINY_MEM}" \
         --time="${AIC_TINY_TIME}"
