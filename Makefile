@@ -697,6 +697,9 @@ install-ci-scripts:            # Deploy .github/scripts/runners/*.sh to the runn
 #     gfx1201 -- see .slurm/run-build-distribute.sh).  RDNA parts have no
 #     NVMe-DMA hardware, so the gds arm is CDNA-only there.
 AIC_CLIFF_GFX ?=
+# GPUs reserved for a SPUR cliff submit. raise it only alongside a matching
+# tensor-parallel config.
+AIC_CLIFF_GPUS ?= 1
 ifeq ($(strip $(AIC_CLIFF_CONSTRAINT)),)
 ifneq ($(strip $(AIC_CLIFF_GFX)),)
 AIC_CLIFF_CONSTRAINT := $(shell echo '$(AIC_CLIFF_GFX)' | tr '[:lower:]' '[:upper:]')
@@ -706,7 +709,7 @@ endif
 endif
 ifeq ($(AIC_SPUR_CLUSTER),1)
 _CLIFF_SPUR_CTL  := SPUR_CONTROLLER_ADDR=$(AIC_SPUR_CONTROLLER)
-_CLIFF_SBATCH_ARGS := --partition=amd-spur --constraint= --gres= \
+_CLIFF_SBATCH_ARGS := --partition=amd-spur --constraint= --gpus=$(AIC_CLIFF_GPUS) \
     $(if $(AIC_CLIFF_NODE),--nodelist=$(AIC_CLIFF_NODE),)
 # SPUR sbatch does not support --parsable or --no-requeue; parse job id from "Submitted batch job N"
 _CLIFF_SUBMIT     = $(_CLIFF_SPUR_CTL) $(_CLIFF_STRIP) sbatch \

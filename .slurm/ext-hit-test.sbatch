@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --partition=amd-spur
 #SBATCH --constraint=
-#SBATCH --gres=
+#SBATCH --gpus=1
 #SBATCH --time=01:30:00
 #SBATCH --job-name=aic-ext-hit-test
 
@@ -29,6 +29,13 @@ VLLM_MODEL="${VLLM_MODEL:-Qwen/Qwen2.5-3B-Instruct}"
 LMCACHE_PORT="${LMCACHE_PORT:-6555}"
 VLLM_PORT="${VLLM_PORT:-8000}"
 
+# --- GPU visibility ---
+export AIC_SPUR_CLUSTER="${AIC_SPUR_CLUSTER:-1}"
+# shellcheck source=monitoring/monitoring-lib.sh
+source "${REPO}/monitoring/monitoring-lib.sh"
+aic_resolve_gpu_visibility \
+    || { echo "ERROR: could not resolve the GPU allocation (refusing to default to GPU 0)" >&2; exit 1; }
+
 # --- Load image ---
 echo "--- Loading image ---"
 if ! docker image inspect "${AIC_IMAGE}" >/dev/null 2>&1; then
@@ -54,7 +61,9 @@ docker run -d --name aic-lmcache \
     --device /dev/kfd --device /dev/dri \
     --ulimit nofile=1048576:1048576 \
     -v "${NVME_DATA}:/data/nvme" \
-    -e ROCR_VISIBLE_DEVICES=0 \
+    -e ROCR_VISIBLE_DEVICES="${AIC_ROCR_VISIBLE}" \
+    -e HIP_VISIBLE_DEVICES="${AIC_HIP_VISIBLE}" \
+    -e CUDA_VISIBLE_DEVICES="${AIC_HIP_VISIBLE}" \
     -e PYTHONUNBUFFERED=1 \
     --entrypoint /bin/bash \
     "${AIC_IMAGE}" \
@@ -95,7 +104,9 @@ docker run -d --name aic-vllm-gpu0 \
     --ipc "container:aic-lmcache" \
     --device /dev/kfd --device /dev/dri \
     -v "${HF_HOME}:/hf" \
-    -e ROCR_VISIBLE_DEVICES=0 \
+    -e ROCR_VISIBLE_DEVICES="${AIC_ROCR_VISIBLE}" \
+    -e HIP_VISIBLE_DEVICES="${AIC_HIP_VISIBLE}" \
+    -e CUDA_VISIBLE_DEVICES="${AIC_HIP_VISIBLE}" \
     -e HF_HOME=/hf \
     -e HF_HUB_CACHE=/hf/hub \
     -e HF_HUB_OFFLINE=1 \

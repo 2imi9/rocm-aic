@@ -1037,12 +1037,13 @@ SMOKE
 set -euo pipefail
 command -v docker >/dev/null 2>&1 || { echo "\$(hostname): docker not found" >&2; exit 1; }
 echo "[test] host=\$(hostname) docker=\$(docker --version)"
-# Preserve Slurm's single-GPU allocation inside Docker.  SPUR sets
-# ROCR_VISIBLE_DEVICES for --gres=gpu:1; CUDA_VISIBLE_DEVICES is the fallback
-# used by some standard Slurm installations.
-_gpu_visible="\${ROCR_VISIBLE_DEVICES:-\${CUDA_VISIBLE_DEVICES:-0}}"
-_gpu_visible="\${_gpu_visible%%,*}"
-echo "[test] allocated gpu=\${_gpu_visible}"
+# Preserve Slurm's GPU allocation inside Docker.
+export AIC_SPUR_CLUSTER='${AIC_SPUR_CLUSTER}'
+# shellcheck source=/dev/null
+source '${AIC_DAY_DIR}/monitoring/monitoring-lib.sh'
+aic_resolve_gpu_visibility \
+    || { echo "[test] could not resolve the GPU allocation (refusing to default to GPU 0)" >&2; exit 1; }
+echo "[test] allocated gpu: ROCR=\${AIC_ROCR_VISIBLE} HIP=\${AIC_HIP_VISIBLE}"
 # Load the image from the shared tarball only when needed.  A node-local marker
 # records the tarball mtime that was last loaded here; we reload when the tarball
 # is newer (a rebuild happened), when the image is absent, or when forced.  We
@@ -1074,7 +1075,9 @@ docker run --rm \
     --cap-add SYS_PTRACE --cap-add SYS_ADMIN \
     --security-opt seccomp=unconfined \
     \${kmounts} \
-    -e ROCR_VISIBLE_DEVICES="\${_gpu_visible}" \
+    -e ROCR_VISIBLE_DEVICES="\${AIC_ROCR_VISIBLE}" \
+    -e HIP_VISIBLE_DEVICES="\${AIC_HIP_VISIBLE}" \
+    -e CUDA_VISIBLE_DEVICES="\${AIC_HIP_VISIBLE}" \
     -e EXPECT_ARCH='${AIC_ROCM_ARCH}' \
     -v '${smoketest}':/tmp/aic-smoketest.sh:ro \
     --entrypoint /bin/bash \
@@ -1160,13 +1163,15 @@ set -uo pipefail
 command -v docker >/dev/null 2>&1 || { echo "\$(hostname): docker not found" >&2; exit 1; }
 echo "[tiny-test] host=\$(hostname) docker=\$(docker --version)"
 # Preserve the GPU selected by Slurm instead of unconditionally exposing host
-# GPU 0 to both vLLM and LMCache.  A single-GPU GRES normally maps this to 0,
-# while the fallback keeps non-Slurm/manual execution working.
-_gpu_visible="\${ROCR_VISIBLE_DEVICES:-\${CUDA_VISIBLE_DEVICES:-0}}"
-_gpu_visible="\${_gpu_visible%%,*}"
-export GPU="\${_gpu_visible}"
+# GPU 0 to both vLLM and LMCache.
+export AIC_SPUR_CLUSTER='${AIC_SPUR_CLUSTER}'
+# shellcheck source=/dev/null
+source '${AIC_DAY_DIR}/monitoring/monitoring-lib.sh'
+aic_resolve_gpu_visibility \
+    || { echo "[tiny-test] could not resolve the GPU allocation (refusing to default to GPU 0)" >&2; exit 1; }
+export GPU="\${AIC_ROCR_VISIBLE%%,*}"
 VLLM_CONTAINER="aic-vllm-gpu\${GPU}"
-echo "[tiny-test] allocated gpu=\${GPU} container=\${VLLM_CONTAINER}"
+echo "[tiny-test] allocated gpu: ROCR=\${AIC_ROCR_VISIBLE} HIP=\${AIC_HIP_VISIBLE} container=\${VLLM_CONTAINER}"
 
 # Load the image from the shared tarball only when needed (same marker logic as
 # smoke-test): reload when forced, absent, or the tarball is newer.
