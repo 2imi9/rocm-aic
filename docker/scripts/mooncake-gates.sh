@@ -91,7 +91,7 @@ gate_wheel_install() (
 	hidden="${MOONCAKE_PREFIX}.wheel-gate-hidden.$$"
 	[[ -d "${MOONCAKE_PREFIX}" ]] || die "Mooncake SDK not found: ${MOONCAKE_PREFIX}"
 	[[ ! -e "${hidden}" ]] || die "temporary SDK path already exists: ${hidden}"
-	# shellcheck disable=SC2329 # Invoked by the EXIT trap below.
+	# shellcheck disable=SC2317,SC2329 # Invoked by the EXIT trap below.
 	cleanup() {
 		if [[ -e "${hidden}" && ! -e "${MOONCAKE_PREFIX}" ]]; then
 			mv "${hidden}" "${MOONCAKE_PREFIX}"
