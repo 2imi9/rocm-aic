@@ -27,7 +27,7 @@ jobs:
           persist-credentials: false
 
       - name: Check README component metadata
-        run: python3 scripts/workflows/sync-readme-versions.py --check
+        run: python3 .github/scripts/workflows/sync-readme-versions.py --check
 
       - name: Test README metadata sync
-        run: python3 scripts/workflows/test_sync_readme_versions.py
+        run: python3 .github/scripts/workflows/test_sync_readme_versions.py

@@ -138,10 +138,11 @@ DIST := $(CURDIR)/.slurm/run-build-distribute.sh
 # The hardware-CI workflows call helper scripts from AIC_CI_LIB_DIR on the
 # self-hosted runner (spur-dist-build.sh / spur-smoke-test.sh / spur-tiny-test.sh
 # / spur-cliff.sh).  `make install-ci-scripts` deploys the source copies from
-# scripts/runners there.  Writing under /usr/local usually needs root, so the
-# target uses sudo when the destination is not writable by the current user.
+# .github/scripts/runners there.  Scripts invoked directly from checked-out
+# workflows live separately under .github/scripts/workflows.  Writing under
+# /usr/local usually needs root, so the target uses sudo when needed.
 AIC_CI_LIB_DIR    ?= /usr/local/lib/aic-ci
-AIC_CI_SCRIPT_DIR := $(CURDIR)/scripts/runners
+AIC_CI_SCRIPT_DIR := $(CURDIR)/.github/scripts/runners
 
 AIC_FAST_ARCH ?= gfx950
 
@@ -298,7 +299,7 @@ help:
 	@echo "  make smoke-test-fast   Smoke-test the single-arch dev image (AIC_FAST_ARCH=$(AIC_FAST_ARCH))"
 	@echo "  make tiny-test         End-to-end serve check (MP stack + tiny model, one completion)"
 	@echo "  make tiny-test-fast    Fast variant of tiny-test"
-	@echo "  make install-ci-scripts  Deploy scripts/runners/spur-*.sh to $(AIC_CI_LIB_DIR) (sudo if needed)"
+	@echo "  make install-ci-scripts  Deploy .github/scripts/runners/*.sh to $(AIC_CI_LIB_DIR) (sudo if needed)"
 	@echo "  make cliff-submit      sbatch the full 3-arm cliff sweep -> logs/<job-id>/"
 	@echo "  make cliff-kvd         sbatch focused KVD cliff: shared prefix, sparse c ladder (1,8,32,64,128,250)"
 	@echo "  make cliff-spur-l2     sbatch SPUR-tuned L2 cliff: per_client prefix, util=0.40, 8GB DRAM L1, c=1/8/32 (vram+nvme)"
@@ -651,14 +652,14 @@ tiny-test-fast:
 	@$(MAKE) --no-print-directory tiny-test \
 	    AIC_ROCM_ARCH='$(AIC_FAST_ARCH)'
 
-install-ci-scripts:            # Deploy scripts/runners/spur-*.sh to the runner's AIC_CI_LIB_DIR
+install-ci-scripts:            # Deploy .github/scripts/runners/*.sh to the runner's AIC_CI_LIB_DIR
 	@set -e; \
 	src="$(AIC_CI_SCRIPT_DIR)"; dst="$(AIC_CI_LIB_DIR)"; \
-	ls "$$src"/spur-*.sh >/dev/null 2>&1 || { echo "ERROR: no spur-*.sh under $$src" >&2; exit 1; }; \
+	ls "$$src"/*.sh >/dev/null 2>&1 || { echo "ERROR: no runner scripts under $$src" >&2; exit 1; }; \
 	if [ -w "$$(dirname "$$dst")" ] || [ -w "$$dst" ]; then SUDO=; else SUDO="sudo"; \
 		echo "$$dst not writable; using sudo"; fi; \
 	$$SUDO install -d -m 0755 "$$dst"; \
-	for f in "$$src"/spur-*.sh; do \
+	for f in "$$src"/*.sh; do \
 		$$SUDO install -m 0755 "$$f" "$$dst/$$(basename "$$f")"; \
 		echo "installed $$(basename "$$f") -> $$dst/"; \
 	done; \

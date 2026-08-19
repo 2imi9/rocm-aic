@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Runs on the self-hosted runner; SSHes to the SPUR head node (AIC_SPUR_HOST),
+# Runs from a workflow checkout on the self-hosted runner; SSHes to the SPUR head node (AIC_SPUR_HOST),
 # submits a CPU-only srun job (no --gres=gpu), and:
 #   1. Launches node-exporter, nvme-exporter, rdma-exporter, and Prometheus
 #   2. Runs the vLLM emulator (backed by the existing rocm-aic image)
