@@ -44,40 +44,56 @@
 declare -F log >/dev/null 2>&1 || log() { printf '[monitoring] %s\n' "$*" >&2; }
 
 # --- GPU visibility resolution ------------------------------------------------
-# Resolve the SPUR GPU allocation for this job and export the values the compose
-# files and `docker run` call sites interpolate:
+# Resolve GPU visibility for this job and export the values the compose files and
+# `docker run` call sites interpolate:
 #
 #   AIC_ROCR_VISIBLE  absolute host GPU IDs   -> ROCR_VISIBLE_DEVICES
 #   AIC_HIP_VISIBLE   relative indices 0..n-1 -> HIP_VISIBLE_DEVICES + CUDA_VISIBLE_DEVICES
 aic_resolve_gpu_visibility() {
     local helper rocr n hip
-    helper="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.slurm" 2>/dev/null && pwd)/spur-gpu-allocation"
 
-    # Fail-closed only on SPUR; everywhere else (workstations, manual runs) fall
-    # back to today's behaviour so local development is unaffected.
-    _aic_gpu_fallback() {
-        if [[ "${AIC_SPUR_CLUSTER:-0}" == "1" ]]; then
-            printf 'aic_resolve_gpu_visibility: %s\n' "$1" >&2
+    _aic_set_gpu_visibility() {
+        local device_ids="$1"
+        [[ "${device_ids}" =~ ^[^,[:space:]]+(,[^,[:space:]]+)*$ ]] || {
+            printf 'aic_resolve_gpu_visibility: malformed GPU visibility: %s\n' "${device_ids}" >&2
             return 1
-        fi
-        export AIC_ROCR_VISIBLE="${GPU:-0}" AIC_HIP_VISIBLE=0
-        return 0
+        }
+        n="$(awk -F, '{print NF}' <<<"${device_ids}")"
+        hip="$(seq -s, 0 "$((n - 1))")"
+        export AIC_ROCR_VISIBLE="${device_ids}" AIC_HIP_VISIBLE="${hip}"
     }
 
-    [[ -n "${SLURM_JOB_ID:-}" ]] || { _aic_gpu_fallback "SLURM_JOB_ID unset; cannot resolve a GPU allocation"; return $?; }
-    [[ -x "${helper}" ]] || { _aic_gpu_fallback "helper not found or not executable: ${helper}"; return $?; }
+    # Only SPUR needs a controller query.  Standard Slurm has already selected
+    # the GPU and exposes that choice via its normal visibility environment.
+    # Do not replace it with GPU 0 or contact SPUR from another cluster.
+    if [[ "${AIC_SPUR_CLUSTER:-0}" != "1" ]]; then
+        rocr="${ROCR_VISIBLE_DEVICES:-${HIP_VISIBLE_DEVICES:-${CUDA_VISIBLE_DEVICES:-${GPU:-0}}}}"
+        _aic_set_gpu_visibility "${rocr}" || return 1
+        log "GPU visibility: ROCR=${AIC_ROCR_VISIBLE} HIP=${AIC_HIP_VISIBLE}"
+        return 0
+    fi
+
+    helper="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.slurm" 2>/dev/null && pwd)/spur-gpu-allocation"
+    [[ -n "${SLURM_JOB_ID:-}" ]] || {
+        printf 'aic_resolve_gpu_visibility: SLURM_JOB_ID unset; cannot resolve a SPUR GPU allocation\n' >&2
+        return 1
+    }
+    [[ -x "${helper}" ]] || {
+        printf 'aic_resolve_gpu_visibility: helper not found or not executable: %s\n' "${helper}" >&2
+        return 1
+    }
 
     rocr="$("${helper}" "${SLURM_JOB_ID}" 2>&1)" \
-        || { _aic_gpu_fallback "helper failed for job ${SLURM_JOB_ID}: ${rocr}"; return $?; }
+        || { printf 'aic_resolve_gpu_visibility: helper failed for job %s: %s\n' "${SLURM_JOB_ID}" "${rocr}" >&2; return 1; }
 
-    [[ -n "${rocr}" ]] || { _aic_gpu_fallback "no GPUs allocated to job ${SLURM_JOB_ID} (is a GPU requested?)"; return $?; }
+    [[ -n "${rocr}" ]] || {
+        printf 'aic_resolve_gpu_visibility: no GPUs allocated to job %s (is a GPU requested?)\n' "${SLURM_JOB_ID}" >&2
+        return 1
+    }
     [[ "${rocr}" =~ ^[0-9]+(,[0-9]+)*$ ]] \
-        || { _aic_gpu_fallback "malformed allocation for job ${SLURM_JOB_ID}: ${rocr}"; return $?; }
+        || { printf 'aic_resolve_gpu_visibility: malformed allocation for job %s: %s\n' "${SLURM_JOB_ID}" "${rocr}" >&2; return 1; }
 
-    n="$(awk -F, '{print NF}' <<<"${rocr}")"
-    hip="$(seq -s, 0 "$((n - 1))")"
-
-    export AIC_ROCR_VISIBLE="${rocr}" AIC_HIP_VISIBLE="${hip}"
+    _aic_set_gpu_visibility "${rocr}" || return 1
     log "GPU allocation for job ${SLURM_JOB_ID}: ROCR=${AIC_ROCR_VISIBLE} HIP=${AIC_HIP_VISIBLE}"
 }
 
