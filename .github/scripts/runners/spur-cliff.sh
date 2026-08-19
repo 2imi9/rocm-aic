@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Runs on the self-hosted runner; SSHes to the SPUR head node (AIC_SPUR_HOST), uses the clone and
+# Installed on the self-hosted runner; SSHes to the SPUR head node (AIC_SPUR_HOST), uses the clone and
 # tarball left by spur-dist-build.sh, and runs a cliff benchmark.
 #
 # Usage: spur-cliff.sh <full-sha> <target>

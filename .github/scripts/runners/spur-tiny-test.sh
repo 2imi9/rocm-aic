@@ -1,18 +1,18 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Runs on the self-hosted runner; SSHes to the SPUR head node (AIC_SPUR_HOST) and runs tiny-test
+# Installed on the self-hosted runner; SSHes to the SPUR head node (AIC_SPUR_HOST) and runs tiny-test
 # against the tarball produced by spur-dist-build.sh for the same SHA (the stage
 # after spur-smoke-test.sh).  tiny-test brings up the compose MP stack
 # (standalone lmcache server + vLLM LMCacheMPConnector) with a tiny model and
 # asserts one non-empty chat completion.
 #
-# Cleanup ownership depends on whether a cliff stage follows:
+# Tarball cleanup ownership depends on whether a cliff stage follows:
 #   * PR flow (dist-build -> smoke-test -> tiny-test): tiny-test is terminal, so
-#     it owns the final cleanup (removes the clone + tarball on exit).
+#     it removes the tarball on exit.
 #   * Nightly (dist-build -> smoke -> tiny -> cliff): cliff runs next and needs
-#     the artifacts, so the nightly tiny-test step sets KEEP_ARTIFACTS=1 and this
-#     script only cleans up on failure (spur-cliff.sh does the final cleanup).
+#     the tarball, so the nightly tiny-test step sets KEEP_ARTIFACTS=1.
+# The run-attempt-scoped clone is always removed best-effort.
 # The tiny model uses the cluster-wide HF cache so it is downloaded once and
 # reused across CI workflows and SPUR accounts.
 
@@ -34,8 +34,12 @@ AIC_SPUR_CONTROLLER="${AIC_SPUR_CONTROLLER:?AIC_SPUR_CONTROLLER must be set (e.g
 AIC_CI_STORAGE_ROOT="${AIC_CI_STORAGE_ROOT:-}"
 KEEP_ARTIFACTS="${KEEP_ARTIFACTS:-0}"
 REPO="https://github.com/ROCm/rocm-aic.git"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=.github/scripts/runners/spur-ci-common.sh
+source "${SCRIPT_DIR}/spur-ci-common.sh"
+aic_ci_session_init "${SHORT}" "tiny-test"
 
-ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=4 "${AIC_SPUR_HOST}" env \
+aic_ci_ssh_bash \
     SHA="${SHA}" \
     REPO="${REPO}" \
     AIC_IMAGE_NAME="${AIC_IMAGE_NAME}" \
@@ -45,27 +49,45 @@ ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=4 "${AIC_SPUR_HOST}" env \
     KEEP_ARTIFACTS="${KEEP_ARTIFACTS}" \
     AIC_SPUR_CONTROLLER="${AIC_SPUR_CONTROLLER}" \
     SPUR_CONTROLLER_ADDR="${AIC_SPUR_CONTROLLER}" \
-    HF_TOKEN="${HF_TOKEN:-}" \
-    bash << 'REMOTE'
+    HF_TOKEN="${HF_TOKEN:-}" << 'REMOTE'
 set -euo pipefail
 
 SHORT="${SHA:0:7}"
-WORKDIR="$HOME/Projects/rocm-aic.${SHORT}"
+WORKDIR="$HOME/Projects/rocm-aic.${SHORT}.${AIC_CI_RUN_KEY}"
 CI_STORAGE_ROOT="${AIC_CI_STORAGE_ROOT:-$HOME/Projects/rocm-aic-ci}"
 TARBALL_DIR="${CI_STORAGE_ROOT}/images/aic-ci-${SHORT}"
+CONTROL_PREFIX="${CI_STORAGE_ROOT}/control/${SHORT}.${AIC_CI_RUN_KEY}.${AIC_CI_STAGE}"
+PID_FILE="${CONTROL_PREFIX}.pid"
+JOB_FILE="${CONTROL_PREFIX}.job"
+CANCEL_FILE="${CONTROL_PREFIX}.cancel"
 
-_cleanup() {
-    echo "=== Cleaning up ==="
-    rm -rf "${WORKDIR}" "${TARBALL_DIR}"
-}
-if [[ "${KEEP_ARTIFACTS}" == "1" ]]; then
-    # A cliff stage follows and reuses the artifacts; only clean up on failure.
-    cleanup_on_fail() { echo "=== Tiny test failed — cleaning up ==="; _cleanup; }
-    trap cleanup_on_fail ERR
-else
-    # Terminal stage: always clean up.
-    trap _cleanup EXIT
+mkdir -p "${CI_STORAGE_ROOT}/control"
+printf '%s\n' "${BASHPID}" > "${PID_FILE}"
+if [[ -e "${CANCEL_FILE}" ]]; then
+    echo "CI session was cancelled before remote startup completed" >&2
+    rm -f "${PID_FILE}" "${JOB_FILE}" "${CANCEL_FILE}" 2>/dev/null || true
+    exit 143
 fi
+export AIC_CI_ACTIVE_JOB_FILE="${JOB_FILE}"
+
+_best_effort_remove() {
+    rm -rf "$@" || echo "WARNING: cleanup could not fully remove: $*" >&2
+}
+_cleanup() {
+    local rc=$?
+    trap - EXIT
+    echo "=== Cleaning up run-attempt worktree ==="
+    _best_effort_remove "${WORKDIR}"
+    if (( rc != 0 )) || [[ "${KEEP_ARTIFACTS}" != "1" ]]; then
+        echo "=== Removing staged image ==="
+        _best_effort_remove "${TARBALL_DIR}"
+    fi
+    if (( rc == 0 )); then
+        rm -f "${PID_FILE}" "${JOB_FILE}" "${CANCEL_FILE}" 2>/dev/null || true
+    fi
+    exit "${rc}"
+}
+trap _cleanup EXIT
 
 # Re-clone if WORKDIR is missing or checked out at the wrong SHA (e.g. stale
 # leftover from a prior failed run at a different commit with the same prefix).

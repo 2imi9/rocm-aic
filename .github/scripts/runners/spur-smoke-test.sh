@@ -1,11 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Runs on the self-hosted runner; SSHes to the SPUR head node (AIC_SPUR_HOST) and
+# Installed on the self-hosted runner; SSHes to the SPUR head node (AIC_SPUR_HOST) and
 # runs the requested smoke-test target against the tarball produced by
-# spur-dist-build.sh for the same SHA. The clone and tarball are left in place
-# for spur-tiny-test.sh (the next stage) to use; spur-tiny-test.sh owns the final
-# cleanup. On failure, cleans up immediately so no stale state is left behind.
+# spur-dist-build.sh for the same SHA. The tarball is left in place for
+# spur-tiny-test.sh; the run-attempt-scoped clone is always removed.
 
 SHA="${1:?usage: $0 <full-sha> [smoke-test|smoke-test-fast]}"
 AIC_SMOKE_TEST_TARGET="${2:-smoke-test}"
@@ -24,8 +23,12 @@ AIC_SHARED_NFS="${AIC_SHARED_NFS:?AIC_SHARED_NFS must be set (e.g. via GitHub re
 AIC_SPUR_CONTROLLER="${AIC_SPUR_CONTROLLER:?AIC_SPUR_CONTROLLER must be set (e.g. via GitHub repo variable)}"
 AIC_CI_STORAGE_ROOT="${AIC_CI_STORAGE_ROOT:-}"
 REPO="https://github.com/ROCm/rocm-aic.git"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=.github/scripts/runners/spur-ci-common.sh
+source "${SCRIPT_DIR}/spur-ci-common.sh"
+aic_ci_session_init "${SHORT}" "smoke-test"
 
-ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=4 "${AIC_SPUR_HOST}" env \
+aic_ci_ssh_bash \
     SHA="${SHA}" \
     REPO="${REPO}" \
     AIC_IMAGE_NAME="${AIC_IMAGE_NAME}" \
@@ -33,23 +36,45 @@ ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=4 "${AIC_SPUR_HOST}" env \
     AIC_SHARED_NFS="${AIC_SHARED_NFS}" \
     AIC_CI_STORAGE_ROOT="${AIC_CI_STORAGE_ROOT}" \
     AIC_SPUR_CONTROLLER="${AIC_SPUR_CONTROLLER}" \
-    SPUR_CONTROLLER_ADDR="${AIC_SPUR_CONTROLLER}" \
-    bash << 'REMOTE'
+    SPUR_CONTROLLER_ADDR="${AIC_SPUR_CONTROLLER}" << 'REMOTE'
 set -euo pipefail
 
 SHORT="${SHA:0:7}"
-WORKDIR="$HOME/Projects/rocm-aic.${SHORT}"
+WORKDIR="$HOME/Projects/rocm-aic.${SHORT}.${AIC_CI_RUN_KEY}"
 CI_STORAGE_ROOT="${AIC_CI_STORAGE_ROOT:-$HOME/Projects/rocm-aic-ci}"
 TARBALL_DIR="${CI_STORAGE_ROOT}/images/aic-ci-${SHORT}"
+CONTROL_PREFIX="${CI_STORAGE_ROOT}/control/${SHORT}.${AIC_CI_RUN_KEY}.${AIC_CI_STAGE}"
+PID_FILE="${CONTROL_PREFIX}.pid"
+JOB_FILE="${CONTROL_PREFIX}.job"
+CANCEL_FILE="${CONTROL_PREFIX}.cancel"
 
-cleanup_on_fail() {
-    echo "=== Smoke test failed — cleaning up ==="
-    rm -rf "${TARBALL_DIR}"
-    find "${WORKDIR}" -mindepth 1 -maxdepth 1 -not -name logs -exec rm -rf {} +
+mkdir -p "${CI_STORAGE_ROOT}/control"
+printf '%s\n' "${BASHPID}" > "${PID_FILE}"
+if [[ -e "${CANCEL_FILE}" ]]; then
+    echo "CI session was cancelled before remote startup completed" >&2
+    rm -f "${PID_FILE}" "${JOB_FILE}" "${CANCEL_FILE}" 2>/dev/null || true
+    exit 143
+fi
+export AIC_CI_ACTIVE_JOB_FILE="${JOB_FILE}"
+
+_best_effort_remove() {
+    rm -rf "$@" || echo "WARNING: cleanup could not fully remove: $*" >&2
 }
-# On success: preserve TARBALL_DIR so the following tiny-test stage can use it.
-# On failure: clean up immediately so no stale state is left behind.
-trap cleanup_on_fail ERR
+_cleanup() {
+    local rc=$?
+    trap - EXIT
+    echo "=== Cleaning up run-attempt worktree ==="
+    _best_effort_remove "${WORKDIR}"
+    if (( rc != 0 )); then
+        echo "=== Smoke test failed — removing staged image ==="
+        _best_effort_remove "${TARBALL_DIR}"
+    fi
+    if (( rc == 0 )); then
+        rm -f "${PID_FILE}" "${JOB_FILE}" "${CANCEL_FILE}" 2>/dev/null || true
+    fi
+    exit "${rc}"
+}
+trap _cleanup EXIT
 
 # Re-clone if WORKDIR is missing or checked out at the wrong SHA.
 ACTUAL_SHA="$(git -C "${WORKDIR}" rev-parse HEAD 2>/dev/null || true)"
