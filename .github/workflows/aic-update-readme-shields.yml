@@ -10,7 +10,14 @@ name: AIC README Version Check
 on:
   pull_request:
     branches: [main]
-    types: [opened, synchronize, reopened, edited]
+    paths:
+      - README.md
+      - docker/Dockerfile
+      - patches/**
+      - .github/scripts/workflows/sync-readme-versions.py
+      - .github/scripts/workflows/test_sync_readme_versions.py
+      - .github/workflows/aic-update-readme-shields.yml
+    types: [opened, synchronize, reopened]
   workflow_dispatch:
 
 permissions:

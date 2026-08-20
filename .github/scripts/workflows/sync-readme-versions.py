@@ -16,7 +16,7 @@ from pathlib import Path
 from urllib.parse import quote
 
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[3]
 DOCKERFILE = REPO_ROOT / "docker" / "Dockerfile"
 README = REPO_ROOT / "README.md"
 REQUIRED_ARGS = (
@@ -240,7 +240,7 @@ def check_or_write(write: bool) -> int:
         )
     )
     print(
-        "Run `python3 scripts/workflows/sync-readme-versions.py --write`, "
+        "Run `python3 .github/scripts/workflows/sync-readme-versions.py --write`, "
         "then commit README.md.",
         file=sys.stderr,
     )
@@ -264,7 +264,7 @@ def main() -> int:
         if error.path == README:
             print(
                 "Restore the named README badge or Stack Overview row, then run "
-                "`python3 scripts/workflows/sync-readme-versions.py --write`.",
+                "`python3 .github/scripts/workflows/sync-readme-versions.py --write`.",
                 file=sys.stderr,
             )
     return 1
