@@ -123,8 +123,9 @@
 #                        (default: <site>&GFX942&NVME -- MI300X + local NVMe).
 #                        Used only when AIC_TEST_NODE is unset.
 #   AIC_TEST_NODE        pin an exact test node via --nodelist  (default: unset)
-#   AIC_TEST_GRES        Slurm GPU resource request for smoke/tiny tests
+#   AIC_TEST_GRES        Standard-Slurm GPU GRES request for smoke/tiny tests
 #                        (default: gpu:1)
+#   AIC_TEST_GPUS        SPUR GPU request for smoke/tiny tests (default: 1)
 #   AIC_TEST_TIME        test job time limit               (default: 00:20:00)
 #   AIC_TEST_CPUS        --cpus-per-task for the test job  (default: 8)
 #   AIC_TEST_MEM         --mem for the test job            (default: 32G)
@@ -219,6 +220,7 @@ AIC_TEST_TIME="${AIC_TEST_TIME:-00:45:00}"
 AIC_TEST_CPUS="${AIC_TEST_CPUS:-8}"
 AIC_TEST_MEM="${AIC_TEST_MEM:-32G}"
 AIC_TEST_GRES="${AIC_TEST_GRES:-gpu:1}"
+AIC_TEST_GPUS="${AIC_TEST_GPUS:-1}"
 
 # --- tiny-test: end-to-end serve check with a tiny model ---------------------
 # Brings up the compose MP stack (standalone lmcache + vLLM LMCacheMPConnector)
@@ -1037,12 +1039,13 @@ SMOKE
 set -euo pipefail
 command -v docker >/dev/null 2>&1 || { echo "\$(hostname): docker not found" >&2; exit 1; }
 echo "[test] host=\$(hostname) docker=\$(docker --version)"
-# Preserve Slurm's single-GPU allocation inside Docker.  SPUR sets
-# ROCR_VISIBLE_DEVICES for --gres=gpu:1; CUDA_VISIBLE_DEVICES is the fallback
-# used by some standard Slurm installations.
-_gpu_visible="\${ROCR_VISIBLE_DEVICES:-\${CUDA_VISIBLE_DEVICES:-0}}"
-_gpu_visible="\${_gpu_visible%%,*}"
-echo "[test] allocated gpu=\${_gpu_visible}"
+# Preserve Slurm's GPU allocation inside Docker.
+export AIC_SPUR_CLUSTER='${AIC_SPUR_CLUSTER}'
+# shellcheck source=/dev/null
+source '${AIC_DAY_DIR}/monitoring/monitoring-lib.sh'
+aic_resolve_gpu_visibility \
+    || { echo "[test] could not resolve the GPU allocation (refusing to default to GPU 0)" >&2; exit 1; }
+echo "[test] allocated gpu: ROCR=\${AIC_ROCR_VISIBLE} HIP=\${AIC_HIP_VISIBLE}"
 # Load the image from the shared tarball only when needed.  A node-local marker
 # records the tarball mtime that was last loaded here; we reload when the tarball
 # is newer (a rebuild happened), when the image is absent, or when forced.  We
@@ -1074,7 +1077,9 @@ docker run --rm \
     --cap-add SYS_PTRACE --cap-add SYS_ADMIN \
     --security-opt seccomp=unconfined \
     \${kmounts} \
-    -e ROCR_VISIBLE_DEVICES="\${_gpu_visible}" \
+    -e ROCR_VISIBLE_DEVICES="\${AIC_ROCR_VISIBLE}" \
+    -e HIP_VISIBLE_DEVICES="\${AIC_HIP_VISIBLE}" \
+    -e CUDA_VISIBLE_DEVICES="\${AIC_HIP_VISIBLE}" \
     -e EXPECT_ARCH='${AIC_ROCM_ARCH}' \
     -v '${smoketest}':/tmp/aic-smoketest.sh:ro \
     --entrypoint /bin/bash \
@@ -1120,12 +1125,17 @@ exit \${img_rc}
 REMOTE
 )"
 
-    # Always reserve a GPU.  Omitting GRES on SPUR lets Slurm co-locate this job
-    # with an existing GPU workload, even though the test launches ROCm code.
-    local -a _gres_arg=(--gres="${AIC_TEST_GRES}")
+    # Always reserve a GPU. SPUR requires --gpus; standard Slurm deployments
+    # retain the configurable GRES request.
+    local -a _gpu_request
+    if [[ "${AIC_SPUR_CLUSTER}" == "1" ]]; then
+        _gpu_request=(--gpus="${AIC_TEST_GPUS}")
+    else
+        _gpu_request=(--gres="${AIC_TEST_GRES}")
+    fi
     _sbatch_run aic-test smoke-test "${remote_script}" \
         "${_sel[@]}" \
-        "${_gres_arg[@]}" \
+        "${_gpu_request[@]}" \
         --nodes=1 --ntasks=1 \
         --cpus-per-task="${AIC_TEST_CPUS}" --mem="${AIC_TEST_MEM}" \
         --time="${AIC_TEST_TIME}"
@@ -1160,13 +1170,15 @@ set -uo pipefail
 command -v docker >/dev/null 2>&1 || { echo "\$(hostname): docker not found" >&2; exit 1; }
 echo "[tiny-test] host=\$(hostname) docker=\$(docker --version)"
 # Preserve the GPU selected by Slurm instead of unconditionally exposing host
-# GPU 0 to both vLLM and LMCache.  A single-GPU GRES normally maps this to 0,
-# while the fallback keeps non-Slurm/manual execution working.
-_gpu_visible="\${ROCR_VISIBLE_DEVICES:-\${CUDA_VISIBLE_DEVICES:-0}}"
-_gpu_visible="\${_gpu_visible%%,*}"
-export GPU="\${_gpu_visible}"
+# GPU 0 to both vLLM and LMCache.
+export AIC_SPUR_CLUSTER='${AIC_SPUR_CLUSTER}'
+# shellcheck source=/dev/null
+source '${AIC_DAY_DIR}/monitoring/monitoring-lib.sh'
+aic_resolve_gpu_visibility \
+    || { echo "[tiny-test] could not resolve the GPU allocation (refusing to default to GPU 0)" >&2; exit 1; }
+export GPU="\${AIC_ROCR_VISIBLE%%,*}"
 VLLM_CONTAINER="aic-vllm-gpu\${GPU}"
-echo "[tiny-test] allocated gpu=\${GPU} container=\${VLLM_CONTAINER}"
+echo "[tiny-test] allocated gpu: ROCR=\${AIC_ROCR_VISIBLE} HIP=\${AIC_HIP_VISIBLE} container=\${VLLM_CONTAINER}"
 
 # Load the image from the shared tarball only when needed (same marker logic as
 # smoke-test): reload when forced, absent, or the tarball is newer.
@@ -1282,11 +1294,16 @@ exit 1
 REMOTE
 )"
 
-    # Always reserve a GPU; see cmd_test for why SPUR must not omit GRES.
-    local -a _gres_arg=(--gres="${AIC_TEST_GRES}")
+    # Always reserve a GPU; see cmd_test for the SPUR-specific request form.
+    local -a _gpu_request
+    if [[ "${AIC_SPUR_CLUSTER}" == "1" ]]; then
+        _gpu_request=(--gpus="${AIC_TEST_GPUS}")
+    else
+        _gpu_request=(--gres="${AIC_TEST_GRES}")
+    fi
     _sbatch_run aic-tiny-test tiny-test "${remote_script}" \
         "${_sel[@]}" \
-        "${_gres_arg[@]}" \
+        "${_gpu_request[@]}" \
         --nodes=1 --ntasks=1 \
         --cpus-per-task="${AIC_TINY_CPUS}" --mem="${AIC_TINY_MEM}" \
         --time="${AIC_TINY_TIME}"
