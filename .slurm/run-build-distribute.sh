@@ -499,6 +499,11 @@ PROLOGUE
                 *)
                     rpc_fail=$((rpc_fail + 1))
                     if (( rpc_fail >= rpc_max )); then
+                        # The only abort that reaches a known job id ahead of
+                        # the post-loop dump, and the one where the job's own
+                        # stderr matters most: the controller is unreachable,
+                        # so nothing downstream will report why.
+                        _dump_spur_stderr
                         die "squeue RPC to ${AIC_SPUR_CONTROLLER} failed ${rpc_fail} consecutive times while watching job ${jobid}; refusing to assume it finished. Last error: $(_squeue_err_text)"
                     fi
                     log "squeue RPC failed (${rpc_fail}/${rpc_max}) while watching job ${jobid}, retrying: $(_squeue_err_text)"
