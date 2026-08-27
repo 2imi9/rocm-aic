@@ -456,13 +456,18 @@ PROLOGUE
         # that file.
         _dump_spur_stderr() {
             local f
+            local -a candidates=()
             for f in "${PWD}/spur-${jobid}.out" "${AIC_DAY_DIR}/spur-${jobid}.out"; do
+                [[ " ${candidates[*]-} " == *" ${f} "* ]] || candidates+=("${f}")
+            done
+            for f in "${candidates[@]}"; do
                 [[ -s "${f}" ]] || continue
                 log "--- stderr from SPUR job ${jobid} (${f}) ---"
                 cat "${f}"
                 log "--- end stderr from SPUR job ${jobid} ---"
                 return 0
             done
+            log "no stderr file for SPUR job ${jobid}; looked in: ${candidates[*]}"
             return 0
         }
 
