@@ -297,21 +297,34 @@ _exporter_tarball_path() {
     printf '%s/%s.%s' "${AIC_IMAGE_DIR}" "${base}" "${COMPRESS_EXT}"
 }
 
-# --- Verify a tarball a build claims to have produced ($1=path $2=what) -------
+# --- Identity stamp for a tarball, empty when it does not exist --------------
+_tarball_stamp() {
+    stat -c '%i:%Y:%s' "$1" 2>/dev/null || true
+}
+
+# --- Verify a tarball THIS build produced ------------------------------------
+# ($1=path $2=what $3=stamp from before submit $4=min bytes)
 # The build runs on a remote node and writes over NFS, so a job that reports
 # success can still leave nothing behind -- and a job whose state was misread
 # (see _sbatch_run) reports success without having finished at all.
+#
+# A re-run of a workflow could see a tarball made from an old run, so we use
+# the `stat` data to verify existence.
 _verify_tarball() {
-    local path="$1" what="${2:-image}" min_bytes="${3:-1024}"
+    local path="$1" what="${2:-image}" before="${3:-}" min_bytes="${4:-1024}"
     # NFS close-to-open consistency: the writing node's `mv` can take a moment
     # to become visible here even though the job has already exited.
-    local tries=0
-    until [[ -f "${path}" ]] || (( tries >= 15 )); do
+    local tries=0 now
+    now="$(_tarball_stamp "${path}")"
+    until [[ -n "${now}" && "${now}" != "${before}" ]] || (( tries >= 15 )); do
         sleep 2; tries=$((tries + 1))
+        now="$(_tarball_stamp "${path}")"
     done
-    [[ -f "${path}" ]] ||
+    [[ -n "${now}" ]] ||
         die "${what} build reported success but produced no tarball: ${path}"
-    local size; size="$(stat -c %s "${path}" 2>/dev/null || echo 0)"
+    [[ "${now}" != "${before}" ]] ||
+        die "${what} build reported success but did not rewrite its tarball; this is an earlier run's artifact (unchanged at ${before}): ${path}"
+    local size="${now##*:}"
     (( size >= min_bytes )) ||
         die "${what} tarball is implausibly small (${size} bytes, expected >= ${min_bytes}): ${path}"
     log "verified ${what} tarball: ${path} ($(du -h "${path}" | cut -f1))"
@@ -632,6 +645,8 @@ PROLOGUE
 cmd_build() {
     _pick_compress
     local tarball; tarball="$(_tarball_path)"
+    # Taken before anything is submitted; see _verify_tarball.
+    local tarball_before; tarball_before="$(_tarball_stamp "${tarball}")"
     # Alias ref (name:latest) built + saved alongside the versioned ref.
     local latest_ref="${AIC_IMAGE%:*}:latest"
     # Forward every version override for Docker tag naming.
@@ -833,7 +848,7 @@ REMOTE
             --cpus-per-task="${AIC_BUILD_CPUS}" \
             --time="${AIC_BUILD_TIME}"
     fi
-    _verify_tarball "${tarball}" "image"
+    _verify_tarball "${tarball}" "image" "${tarball_before}"
     log "build complete: ${tarball}"
 }
 
@@ -853,6 +868,10 @@ cmd_build_exporters() {
     local nvme_tar rdma_tar
     nvme_tar="$(_exporter_tarball_path "${AIC_NVME_EXPORTER_IMAGE}")"
     rdma_tar="$(_exporter_tarball_path "${AIC_RDMA_EXPORTER_IMAGE}")"
+    # Taken before anything is submitted; see _verify_tarball.
+    local nvme_before rdma_before
+    nvme_before="$(_tarball_stamp "${nvme_tar}")"
+    rdma_before="$(_tarball_stamp "${rdma_tar}")"
 
     log "exporter images : ${AIC_NVME_EXPORTER_IMAGE} (nvme v${AIC_NVME_EXPORTER_VERSION}), ${AIC_RDMA_EXPORTER_IMAGE} (rdma v${AIC_RDMA_EXPORTER_VERSION})"
     log "tarballs   : ${nvme_tar}, ${rdma_tar}  (compress: ${AIC_COMPRESS})"
@@ -926,8 +945,8 @@ REMOTE
             --cpus-per-task=2 --mem=8G "${_exp_overcommit[@]}" \
             --time="${AIC_LOAD_TIME}"
     fi
-    _verify_tarball "${nvme_tar}" "nvme-exporter"
-    _verify_tarball "${rdma_tar}" "rdma-exporter"
+    _verify_tarball "${nvme_tar}" "nvme-exporter" "${nvme_before}"
+    _verify_tarball "${rdma_tar}" "rdma-exporter" "${rdma_before}"
     log "exporter build complete: ${nvme_tar}, ${rdma_tar}"
 }
 
