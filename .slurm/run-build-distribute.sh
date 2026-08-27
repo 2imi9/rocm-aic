@@ -443,6 +443,21 @@ PROLOGUE
         }
         _squeue_err_text() { tr '\n' ' ' < "${squeue_err}" 2>/dev/null | head -c 300; }
 
+        # SPUR does NOT fold the job's stderr into --output the way Slurm does.
+        # It writes stderr to <submit-cwd>/spur-<jobid>.out and nothing reads
+        # that file.
+        _dump_spur_stderr() {
+            local f
+            for f in "${PWD}/spur-${jobid}.out" "${AIC_DAY_DIR}/spur-${jobid}.out"; do
+                [[ -s "${f}" ]] || continue
+                log "--- stderr from SPUR job ${jobid} (${f}) ---"
+                cat "${f}"
+                log "--- end stderr from SPUR job ${jobid} ---"
+                return 0
+            done
+            return 0
+        }
+
         # Wait up to 60s for the job to appear.  A very short job can finish
         # before the first poll, so not appearing is a warning, not an error.
         local appear_tries=0 appeared=0 probe=0
@@ -481,9 +496,11 @@ PROLOGUE
         done
         rm -f "${squeue_err}" 2>/dev/null || true
 
-        # Flush any remaining lines after job completes.
+        # Flush any remaining lines after job completes, then surface anything
+        # SPUR captured on the side channel.
         sleep 2
         _print_new_lines
+        _dump_spur_stderr
 
         # Read the real exit code from sacct ("<code>:<signal>" format).
         # SPUR sacct ignores -j and returns all jobs; grep for the exact job ID
