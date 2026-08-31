@@ -61,12 +61,14 @@ ARG ROCM_VERSION=7.14.0
 # ROCm 7.14 publishes the hipFile-bearing variant as `-full` (not `-complete`).
 ARG ROCM_BASE_IMAGE=rocm/dev-ubuntu-24.04:${ROCM_VERSION}-full
 
-# Mooncake: source-built at an exact commit (the first revision carrying the
-# upstream ROCm/HIP wheel + CI recipe).  Bump only with evidence: the build
-# below follows that revision's own ROCm recipe.
+# Mooncake: source-built at an exact commit.  v0.3.13.post1 is the first
+# released tag carrying the upstream ROCm/HIP wheel + CI recipe (kvcache-ai/
+# Mooncake#3184, merged upstream), so the pin no longer rides a pull-request
+# head that upstream can rewrite or delete.  Bump only with evidence: the build
+# below follows that revision's own ROCm recipe (.github/workflows/ci_rocm.yml).
 ARG MOONCAKE_GIT_URL=https://github.com/kvcache-ai/Mooncake.git
-ARG MOONCAKE_REF=e164c96b3c184b34f7979c47c176c2e51a926f66
-ARG MOONCAKE_FETCH_REF=refs/pull/3184/head
+ARG MOONCAKE_REF=719735896c86b56fabec6cf3e825fb2ea640597a
+ARG MOONCAKE_FETCH_REF=refs/tags/v0.3.13.post1
 ARG GO_VERSION=1.25.9
 ARG GO_AMD64_SHA256=00859d7bd6defe8bf84d9db9e57b9a4467b2887c18cd93ae7460e713db774bc1
 # Staged SDK (headers + shared libraries + tools) consumed by the LMCache
@@ -210,11 +212,24 @@ RUN --mount=type=cache,target=/root/.cache/go-build,sharing=locked \
 # yalantinglibs - all of which a consumer of the store client compiles against.
 # Copy them explicitly, then assert the result: a silently incomplete SDK would
 # only surface as a confusing compile error one stage later.
+#
+# yalantinglibs has two possible locations and both are searched, because
+# upstream moved it: it used to be built and installed into /usr/local by
+# dependencies.sh, and as of the pinned revision CMake fetches it into the
+# build tree (mooncake-common/FindYLT.cmake) with EXCLUDE_FROM_ALL, so it is
+# never installed.  The `include/ylt` assertion below is what actually proves
+# one of the two paths landed.
 RUN set -eu; \
     src=/src/Mooncake; \
     include="${MOONCAKE_PREFIX}/include"; \
     mkdir -p "${include}" "${MOONCAKE_PREFIX}/lib"; \
     cp -a /usr/local/include/. "${include}/"; \
+    ylt_include="$(find "${src}/build/_deps" -maxdepth 3 -type d \
+        -path '*yalantinglibs*/include' -print -quit 2>/dev/null || true)"; \
+    if [ -n "${ylt_include}" ]; then \
+        echo "Staging yalantinglibs headers from ${ylt_include}"; \
+        cp -a "${ylt_include}/." "${include}/"; \
+    fi; \
     cp -a "${src}/mooncake-transfer-engine/include/." "${include}/"; \
     cp -a "${src}/mooncake-common/include/." "${include}/"; \
     cp -a "${src}/mooncake-store/include/." "${include}/"; \
