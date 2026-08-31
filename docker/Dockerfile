@@ -82,8 +82,8 @@ FROM scratch AS pip-wheels
 # ----- Stage M. Mooncake (source build at the pinned commit) -----------------
 # Independent builder on the same ROCm base.  Only ${MOONCAKE_PREFIX} and the
 # built wheel cross into the main stage, so this stage's system-wide side
-# effects (Go toolchain, yalantinglibs in /usr/local, the CMake install of the
-# mooncake python package into site-packages) never reach the runtime image.
+# effects (Go toolchain, the fetched yalantinglibs tree, the CMake install of
+# the mooncake python package into site-packages) never reach the runtime image.
 #
 # hadolint ignore=DL3006
 FROM ${ROCM_BASE_IMAGE} AS mooncake-build
@@ -152,8 +152,9 @@ RUN git init /src/Mooncake && \
         exit 1; \
     fi
 
-# Upstream's own dependency installer: system packages, git submodules
-# (pybind11, yalantinglibs) and the yalantinglibs install into /usr/local.
+# Upstream's own dependency installer: system packages, the pybind11 submodule
+# and the Go toolchain.  It no longer builds or installs yalantinglibs, which
+# CMake fetches into the build tree at configure time instead.
 # Kept whole on purpose - it is the recipe the pinned revision builds against.
 RUN cd /src/Mooncake && bash dependencies.sh -y
 
