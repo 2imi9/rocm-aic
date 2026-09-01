@@ -39,6 +39,7 @@ ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=4 "${AIC_SPUR_HOST}" env \
     AIC_SMOKE_USE_REGISTRY="${AIC_SMOKE_USE_REGISTRY}" \
     bash << 'REMOTE'
 set -euo pipefail
+export PATH="/usr/local/bin:${PATH}"
 
 SHORT="${SHA:0:7}"
 WORKDIR="$HOME/Projects/rocm-aic.${SHORT}"
