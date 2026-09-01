@@ -155,6 +155,7 @@
 #                                                            else gzip)
 #
 set -euo pipefail
+export PATH="/usr/local/bin:${PATH}"
 
 # --- Resolve paths (script lives at aic-release/.slurm/) ------------------
 # The tree is self-contained: the Docker build context IS aic-release/.

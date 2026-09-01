@@ -32,6 +32,8 @@
 #   Optional: AIC_PROM_IMAGE/PORT/RETENTION, AIC_{NODE,AMDGPU,NVME,RDMA}_EXPORTER_IMAGE,
 #             AIC_{NVME,RDMA}_EXPORTER_ARGS, {NVME,RDMA}_EXPORTER_PORT, HSA_SNOOP_PORT.
 
+export PATH="/usr/local/bin:${PATH}"
+
 # --- Caller-provided vars: defaults so the lib is self-contained + SC2154-clean.
 : "${AIC_IMAGE:=rocm-aic:latest}"
 : "${AIC_MONITORING:=1}"
