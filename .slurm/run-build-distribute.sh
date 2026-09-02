@@ -148,6 +148,11 @@
 #   AIC_SPUR_CONTROLLER  SPUR controller address passed as --controller to every
 #                        sbatch/srun/squeue call when AIC_SPUR_CLUSTER=1.
 #                        (default: $SPUR_CONTROLLER_ADDR)
+#   AIC_SPUR_RPC_RETRIES consecutive squeue RPC failures tolerated while watching
+#                        a job before _sbatch_run gives up.  At the 10s poll
+#                        interval the default is ~5min of controller
+#                        unreachability.  A failed RPC is never treated as "the
+#                        job finished".                      (default: 30)
 #
 #   AIC_TLS_CERT         corporate CA cert (BuildKit secret, never baked into image)
 #                        (default: $HOME/certs/zscaler-ca.crt if it exists; else none)
@@ -293,6 +298,39 @@ _exporter_tarball_path() {
     printf '%s/%s.%s' "${AIC_IMAGE_DIR}" "${base}" "${COMPRESS_EXT}"
 }
 
+# --- Identity stamp for a tarball, empty when it does not exist --------------
+_tarball_stamp() {
+    stat -c '%i:%Y:%s' "$1" 2>/dev/null || true
+}
+
+# --- Verify a tarball THIS build produced ------------------------------------
+# ($1=path $2=what $3=stamp from before submit $4=min bytes)
+# The build runs on a remote node and writes over NFS, so a job that reports
+# success can still leave nothing behind -- and a job whose state was misread
+# (see _sbatch_run) reports success without having finished at all.
+#
+# A re-run of a workflow could see a tarball made from an old run, so we use
+# the `stat` data to verify existence.
+_verify_tarball() {
+    local path="$1" what="${2:-image}" before="${3:-}" min_bytes="${4:-1024}"
+    # NFS close-to-open consistency: the writing node's `mv` can take a moment
+    # to become visible here even though the job has already exited.
+    local tries=0 now
+    now="$(_tarball_stamp "${path}")"
+    until [[ -n "${now}" && "${now}" != "${before}" ]] || (( tries >= 15 )); do
+        sleep 2; tries=$((tries + 1))
+        now="$(_tarball_stamp "${path}")"
+    done
+    [[ -n "${now}" ]] ||
+        die "${what} build reported success but produced no tarball: ${path}"
+    [[ "${now}" != "${before}" ]] ||
+        die "${what} build reported success but did not rewrite its tarball; this is an earlier run's artifact (unchanged at ${before}): ${path}"
+    local size="${now##*:}"
+    (( size >= min_bytes )) ||
+        die "${what} tarball is implausibly small (${size} bytes, expected >= ${min_bytes}): ${path}"
+    log "verified ${what} tarball: ${path} ($(du -h "${path}" | cut -f1))"
+}
+
 # --- sbatch dispatch (mirrors run-cliff.sbatch's per-job logging) -------------
 # Submit BODY as an sbatch batch job whose output streams into
 # logs/<job-id>/<logname>.out under the tree -- the SAME per-job structure
@@ -314,7 +352,8 @@ _sbatch_run() {
     # redirects everything into <logname>.out, then the caller's body.
     # AIC_DAY_DIR is absolute and on shared storage, so it resolves on the
     # compute node without relying on SLURM_SUBMIT_DIR.  --output=/dev/null
-    # discards any pre-redirect output (there is none here).
+    # discards any pre-redirect output, so anything printed before the `exec`
+    # below survives only on stderr -- see _dump_spur_stderr.
     local script
     # The body runs in a subshell so its own `trap EXIT` cannot clobber the
     # outer exit-file write.  The outer EXIT trap always fires last and records
@@ -323,7 +362,14 @@ _sbatch_run() {
 #!/bin/bash
 _logdir="${AIC_DAY_DIR}/logs/\${SLURM_JOB_ID:-manual}"
 _exitfile="${AIC_DAY_DIR}/logs/\${SLURM_JOB_ID:-manual}/${logname}.exit"
-mkdir -p "\${_logdir}" 2>/dev/null && exec >>"\${_logdir}/${logname}.out" 2>&1
+if ! mkdir -p "\${_logdir}"; then
+    echo "FATAL: \$(hostname): cannot create log dir \${_logdir} (job \${SLURM_JOB_ID:-manual})" >&2
+    exit 99
+fi
+if ! exec >>"\${_logdir}/${logname}.out" 2>&1; then
+    echo "FATAL: \$(hostname): cannot open \${_logdir}/${logname}.out for append" >&2
+    exit 99
+fi
 ( ${body} )
 _body_rc=\$?
 echo "\${_body_rc}" > "\${_exitfile}" 2>/dev/null || true
@@ -389,33 +435,104 @@ PROLOGUE
             fi
         }
 
-        # SPUR ignores -j and may return a large queue.  Consume all of squeue's
-        # output before deciding whether the job is present: an early-exiting
-        # grep -q closes the pipe and makes squeue fail with SIGPIPE under
-        # pipefail, which looks like the job disappeared.
+        # Job-state probe.  Returns THREE outcomes, because "the controller says
+        # the job is gone" and "the controller did not answer" must not be the
+        # same event:
+        #     0 = controller answered, job is in the queue
+        #     1 = controller answered, job is not in the queue
+        #     2 = the squeue RPC itself failed
+        # Collapsing 2 into 1 silently truncates the watch loop and reports a
+        # still-running job as finished.  The SPUR head node shares CPU with
+        # interactive sessions and its control-plane RTT is bursty (measured:
+        # 0.12ms min / 243ms max, with NIC RX drops under load), so transient
+        # RPC failures are expected rather than exceptional.
+        #
+        # SPUR does not always honour -j and may return the whole queue, so the
+        # row is still selected by exact job id.  Consume all of squeue's output
+        # before deciding -- an early-exiting `grep -q` closes the pipe and makes
+        # squeue fail with SIGPIPE under pipefail, which also looks like the job
+        # disappeared.
+        local squeue_err; squeue_err="$(mktemp)"
         _spur_job_is_queued() {
-            squeue --controller="${AIC_SPUR_CONTROLLER}" -j "${jobid}" -h 2>/dev/null |
-                awk -v id="${jobid}" '
-                    $1 == id { found = 1 }
-                    END { exit found ? 0 : 1 }
-                '
+            local out rc=0
+            out="$(squeue --controller="${AIC_SPUR_CONTROLLER}" -j "${jobid}" -h \
+                    2>"${squeue_err}")" || rc=$?
+            (( rc == 0 )) || return 2
+            awk -v id="${jobid}" '
+                $1 == id { found = 1 }
+                END { exit found ? 0 : 1 }
+            ' <<<"${out}"
+        }
+        _squeue_err_text() { tr '\n' ' ' < "${squeue_err}" 2>/dev/null | head -c 300; }
+
+        # SPUR does NOT fold the job's stderr into --output the way Slurm does.
+        # It writes stderr to <submit-cwd>/spur-<jobid>.out and nothing reads
+        # that file.
+        _dump_spur_stderr() {
+            local f
+            local -a candidates=()
+            for f in "${PWD}/spur-${jobid}.out" "${AIC_DAY_DIR}/spur-${jobid}.out"; do
+                [[ " ${candidates[*]-} " == *" ${f} "* ]] || candidates+=("${f}")
+            done
+            for f in "${candidates[@]}"; do
+                [[ -s "${f}" ]] || continue
+                log "--- stderr from SPUR job ${jobid} (${f}) ---"
+                cat "${f}"
+                log "--- end stderr from SPUR job ${jobid} ---"
+                return 0
+            done
+            log "no stderr file for SPUR job ${jobid}; looked in: ${candidates[*]}"
+            return 0
         }
 
-        # Wait up to 60s for the job to appear.
-        local appear_tries=0
-        until _spur_job_is_queued || (( appear_tries >= 60 )); do
+        # Wait up to 60s for the job to appear.  A very short job can finish
+        # before the first poll, so not appearing is a warning, not an error.
+        local appear_tries=0 appeared=0 probe=0
+        while (( appear_tries < 60 )); do
+            probe=0; _spur_job_is_queued || probe=$?
+            (( probe == 0 )) && { appeared=1; break; }
             sleep 1; appear_tries=$((appear_tries + 1))
         done
+        (( appeared == 1 )) ||
+            log "WARNING: job ${jobid} did not appear in squeue within 60s"
 
-        # Poll until the job leaves the queue, streaming new log lines.
-        while _spur_job_is_queued; do
+        # Poll until the job leaves the queue, streaming new log lines.  A
+        # transient RPC failure is retried rather than treated as completion,
+        # but a sustained one aborts loudly instead of guessing the job's state.
+        # The active-job file is deliberately left in place on that abort so the
+        # CI wrapper can cancel the orphaned Slurm job.
+        #
+        # 30 retries at the 10s poll interval tolerates ~5min of controller
+        # unreachability.
+        local rpc_fail=0 rpc_max="${AIC_SPUR_RPC_RETRIES:-30}"
+        while :; do
+            probe=0; _spur_job_is_queued || probe=$?
+            case "${probe}" in
+                0) rpc_fail=0 ;;
+                1) break ;;
+                *)
+                    rpc_fail=$((rpc_fail + 1))
+                    if (( rpc_fail >= rpc_max )); then
+                        # The only abort that reaches a known job id ahead of
+                        # the post-loop dump, and the one where the job's own
+                        # stderr matters most: the controller is unreachable,
+                        # so nothing downstream will report why.
+                        _dump_spur_stderr
+                        die "squeue RPC to ${AIC_SPUR_CONTROLLER} failed ${rpc_fail} consecutive times while watching job ${jobid}; refusing to assume it finished. Last error: $(_squeue_err_text)"
+                    fi
+                    log "squeue RPC failed (${rpc_fail}/${rpc_max}) while watching job ${jobid}, retrying: $(_squeue_err_text)"
+                    ;;
+            esac
             _print_new_lines
             sleep 10
         done
+        rm -f "${squeue_err}" 2>/dev/null || true
 
-        # Flush any remaining lines after job completes.
+        # Flush any remaining lines after job completes, then surface anything
+        # SPUR captured on the side channel.
         sleep 2
         _print_new_lines
+        _dump_spur_stderr
 
         # Read the real exit code from sacct ("<code>:<signal>" format).
         # SPUR sacct ignores -j and returns all jobs; grep for the exact job ID
@@ -431,19 +548,50 @@ PROLOGUE
         done
         if [[ -f "${exit_file}" ]]; then
             acct_exit="$(tr -d '[:space:]' < "${exit_file}" 2>/dev/null)"
+            [[ "${acct_exit}" =~ ^[0-9]+$ ]] ||
+                die "exit file ${exit_file} for job ${jobid} is not a number: '${acct_exit}'"
             log "exit code from file: ${acct_exit} (${exit_file})"
         else
-            acct_exit="$(sacct --controller="${AIC_SPUR_CONTROLLER}" -j "${jobid}" \
-                --format=JobID,ExitCode --noheader 2>/dev/null \
-                | awk -v id="${jobid}" '
-                    $1 == id && !found {
-                        split($2, fields, ":")
-                        code = fields[1]
-                        found = 1
-                    }
-                    END { if (found) print code }
-                ')"
-            log "exit code from sacct: ${acct_exit:-<empty>} (job ${jobid})"
+            # sacct fallback.  Two SPUR behaviours make the naive read unsafe:
+            #   * a job that has NOT finished reports ExitCode "0:0" -- verified
+            #     across all 159 RUNNING jobs on the cluster -- so the state must
+            #     be checked before the code, or a live job reads as success;
+            #   * -j is not always honoured and the whole table can come back,
+            #     so the row is selected by exact job id.
+            # Requesting JobID,State,ExitCode (no JobName) keeps the columns
+            # stable: SPUR emits an empty JobName for many rows, which shifts
+            # every subsequent field left by one.
+            log "WARNING: falling back to using sacct instead of reading expected exit file ${exit_file}."
+            local _terminal='COMPLETED|FAILED|CANCELLED|TIMEOUT|NODE_FAIL|OUT_OF_MEMORY|PREEMPTED|DEADLINE|BOOT_FAIL'
+            _spur_sacct_row() {
+                sacct --controller="${AIC_SPUR_CONTROLLER}" -j "${jobid}" \
+                    --format=JobID,State,ExitCode --noheader 2>/dev/null \
+                    | awk -v id="${jobid}" '$1 == id && !found { print $2, $3; found = 1 }'
+            }
+            # The job left the queue, so accounting should settle shortly; give
+            # it up to 60s to reach a terminal state before giving up.
+            local sacct_row="" state="" code="" st_tries=0
+            while (( st_tries < 30 )); do
+                sacct_row="$(_spur_sacct_row)"
+                state="${sacct_row%% *}"; code="${sacct_row##* }"
+                [[ -n "${state}" && "${state}" =~ ^(${_terminal})$ ]] && break
+                sleep 2; st_tries=$((st_tries + 1))
+            done
+            [[ -n "${state}" ]] ||
+                die "job ${jobid} left the queue but has no sacct record; cannot determine its exit status"
+            [[ "${state}" =~ ^(${_terminal})$ ]] ||
+                die "job ${jobid} left the queue but sacct still reports state ${state} after 60s; refusing to guess its exit status"
+            acct_exit="${code%%:*}"
+            if [[ "${state}" == "COMPLETED" ]]; then
+                [[ "${acct_exit}" =~ ^[0-9]+$ ]] || acct_exit=0
+            else
+                # Non-COMPLETED must never yield 0.  SPUR reports "0:0" for some
+                # cancelled jobs and "-1:0" for others; neither is a success and
+                # neither is a valid shell exit status.
+                [[ "${acct_exit}" =~ ^[1-9][0-9]*$ ]] || acct_exit=1
+            fi
+            (( acct_exit > 255 )) && acct_exit=1   # `return 256` would wrap to 0
+            log "exit code from sacct: ${acct_exit} (job ${jobid}, state ${state})"
         fi
         rc="${acct_exit:-1}"
     else
@@ -498,6 +646,8 @@ PROLOGUE
 cmd_build() {
     _pick_compress
     local tarball; tarball="$(_tarball_path)"
+    # Taken before anything is submitted; see _verify_tarball.
+    local tarball_before; tarball_before="$(_tarball_stamp "${tarball}")"
     # Alias ref (name:latest) built + saved alongside the versioned ref.
     local latest_ref="${AIC_IMAGE%:*}:latest"
     # Forward every version override for Docker tag naming.
@@ -699,6 +849,7 @@ REMOTE
             --cpus-per-task="${AIC_BUILD_CPUS}" \
             --time="${AIC_BUILD_TIME}"
     fi
+    _verify_tarball "${tarball}" "image" "${tarball_before}"
     log "build complete: ${tarball}"
 }
 
@@ -718,6 +869,10 @@ cmd_build_exporters() {
     local nvme_tar rdma_tar
     nvme_tar="$(_exporter_tarball_path "${AIC_NVME_EXPORTER_IMAGE}")"
     rdma_tar="$(_exporter_tarball_path "${AIC_RDMA_EXPORTER_IMAGE}")"
+    # Taken before anything is submitted; see _verify_tarball.
+    local nvme_before rdma_before
+    nvme_before="$(_tarball_stamp "${nvme_tar}")"
+    rdma_before="$(_tarball_stamp "${rdma_tar}")"
 
     log "exporter images : ${AIC_NVME_EXPORTER_IMAGE} (nvme v${AIC_NVME_EXPORTER_VERSION}), ${AIC_RDMA_EXPORTER_IMAGE} (rdma v${AIC_RDMA_EXPORTER_VERSION})"
     log "tarballs   : ${nvme_tar}, ${rdma_tar}  (compress: ${AIC_COMPRESS})"
@@ -791,6 +946,8 @@ REMOTE
             --cpus-per-task=2 --mem=8G "${_exp_overcommit[@]}" \
             --time="${AIC_LOAD_TIME}"
     fi
+    _verify_tarball "${nvme_tar}" "nvme-exporter" "${nvme_before}"
+    _verify_tarball "${rdma_tar}" "rdma-exporter" "${rdma_before}"
     log "exporter build complete: ${nvme_tar}, ${rdma_tar}"
 }
 
