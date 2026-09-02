@@ -157,8 +157,10 @@ ifeq ($(AIC_SPUR_CLUSTER),1)
 export AIC_SPUR_CLUSTER
 export AIC_SPUR_CONTROLLER  ?= $(SPUR_CONTROLLER_ADDR)
 export AIC_IMAGE_DIR        ?= $(AIC_SHARED_NFS)/rocm-aic/images
-# Cache export is best-effort, so SPUR runners can share one BuildKit cache.
-export AIC_CACHE_DIR        ?= $(AIC_SHARED_NFS)/rocm-aic/images/buildcache
+# Per-user BuildKit cache on the shared NFS volume: $HOME is small and quota'd
+# on SPUR, and a cache shared across users is not writable by all of them.
+# Cache export is best-effort, so a user's concurrent builds still share it.
+export AIC_CACHE_DIR        ?= $(AIC_SHARED_NFS)/$(USER)/buildcache
 # SPUR nodes have 8x NVMe drives combined into a single LVM at /mnt/m2m_nobackup.
 # Use override (not ?=) so these win over the top-level ?= defaults set earlier.
 # HF_HOME points to the cluster-wide model cache since /scratch does not exist
@@ -697,6 +699,9 @@ install-ci-scripts:            # Deploy .github/scripts/runners/*.sh to the runn
 #     gfx1201 -- see .slurm/run-build-distribute.sh).  RDNA parts have no
 #     NVMe-DMA hardware, so the gds arm is CDNA-only there.
 AIC_CLIFF_GFX ?=
+# GPUs reserved for a SPUR cliff submit. raise it only alongside a matching
+# tensor-parallel config.
+AIC_CLIFF_GPUS ?= 1
 ifeq ($(strip $(AIC_CLIFF_CONSTRAINT)),)
 ifneq ($(strip $(AIC_CLIFF_GFX)),)
 AIC_CLIFF_CONSTRAINT := $(shell echo '$(AIC_CLIFF_GFX)' | tr '[:lower:]' '[:upper:]')
@@ -706,7 +711,7 @@ endif
 endif
 ifeq ($(AIC_SPUR_CLUSTER),1)
 _CLIFF_SPUR_CTL  := SPUR_CONTROLLER_ADDR=$(AIC_SPUR_CONTROLLER)
-_CLIFF_SBATCH_ARGS := --partition=amd-spur --constraint= --gres= \
+_CLIFF_SBATCH_ARGS := --partition=amd-spur --constraint= --gpus=$(AIC_CLIFF_GPUS) \
     $(if $(AIC_CLIFF_NODE),--nodelist=$(AIC_CLIFF_NODE),)
 # SPUR sbatch does not support --parsable or --no-requeue; parse job id from "Submitted batch job N"
 _CLIFF_SUBMIT     = $(_CLIFF_SPUR_CTL) $(_CLIFF_STRIP) sbatch \
