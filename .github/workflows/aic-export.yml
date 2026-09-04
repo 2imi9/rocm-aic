@@ -104,7 +104,7 @@ jobs:
           ARG ROCM_VERSION=7.14.0
           ARG ROCM_BASE_IMAGE=rocm/dev-ubuntu-24.04:${ROCM_VERSION}-full
           ARG VLLM_GIT_URL=https://github.com/vllm-project/vllm.git
-          ARG VLLM_REF=v0.26.0
+          ARG VLLM_REF=v0.27.1
           ARG LMCACHE_GIT_URL=https://github.com/LMCache/LMCache.git
           ARG LMCACHE_REF=v0.5.4
           ARG MOONCAKE_GIT_URL=https://github.com/kvcache-ai/Mooncake.git

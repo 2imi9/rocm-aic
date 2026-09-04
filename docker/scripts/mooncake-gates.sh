@@ -3,7 +3,7 @@
 #
 # SPDX-License-Identifier: MIT
 #
-# Fail-closed gates for the canonical LMCache wheel (the HIP c_ops extension
+# Fail-closed gates for the canonical LMCache wheel (the HIP cuda_ops extension
 # and the host-only Mooncake backend in ONE wheel) and for the source-built
 # Mooncake ROCm package.  Every gate exits non-zero on failure, so a failing
 # gate stops the image build.
@@ -24,6 +24,10 @@ set -euo pipefail
 MOONCAKE_PREFIX="${MOONCAKE_PREFIX:-/opt/mooncake-sdk}"
 # shellcheck disable=SC2016 # $ORIGIN must remain literal in the ELF RPATH.
 WHEEL_MOONCAKE_RPATH='$ORIGIN/../mooncake:$ORIGIN/../mooncake_transfer_engine_rocm.libs'
+# The LMCache pin is a build argument, which the finished image does not keep.
+# The build records it in this file so the standalone re-run (see above) checks
+# the pin the image was actually built with, not a literal in this script.
+LMCACHE_REF_FILE="${LMCACHE_REF_FILE:-/etc/aic/lmcache-ref}"
 
 die() {
 	echo "ERROR: $*" >&2
@@ -48,7 +52,7 @@ def members(path):
         return archive.namelist()
 
 lmcache = members(lmcache_wheel)
-for prefix in ("lmcache/c_ops", "lmcache/lmcache_mooncake"):
+for prefix in ("lmcache/cuda_ops", "lmcache/lmcache_mooncake"):
     if not any(name.startswith(prefix) and name.endswith(".so") for name in lmcache):
         raise SystemExit("ERROR: %s is missing %s*.so" % (lmcache_wheel, prefix))
 
@@ -148,17 +152,18 @@ import importlib.util
 import pathlib
 import sys
 
-import torch  # noqa: F401 — must be imported before lmcache.c_ops
+import torch  # noqa: F401 — must be imported before lmcache.cuda_ops
 
 root = pathlib.Path(sys.argv[1]).resolve()
 
-# LMCache installs a compatibility shim at lmcache.c_ops on CPU-only hosts.
+# LMCache binds lmcache.cuda_ops lazily and silently falls back to its torch
+# baseline when that import fails, so importing the package proves nothing.
 # Load the wheel's extension file directly so this GPU-less build gate still
 # proves that the native artifact itself can be initialized.
-native_path = next((root / "lmcache").glob("c_ops*.so"), None)
+native_path = next((root / "lmcache").glob("cuda_ops*.so"), None)
 if native_path is None:
-    raise SystemExit("ERROR: clean install is missing c_ops*.so")
-spec = importlib.util.spec_from_file_location("lmcache.c_ops", native_path)
+    raise SystemExit("ERROR: clean install is missing cuda_ops*.so")
+spec = importlib.util.spec_from_file_location("lmcache.cuda_ops", native_path)
 if spec is None or spec.loader is None:
     raise SystemExit("ERROR: cannot create an import spec for %s" % native_path)
 native = importlib.util.module_from_spec(spec)
@@ -167,10 +172,10 @@ spec.loader.exec_module(native)
 loaded_native_path = pathlib.Path(native.__file__).resolve()
 if not loaded_native_path.is_relative_to(root):
     raise SystemExit(
-        "ERROR: lmcache.c_ops loaded from %s, outside %s"
+        "ERROR: lmcache.cuda_ops loaded from %s, outside %s"
         % (loaded_native_path, root)
     )
-print("  clean import: lmcache.c_ops -> %s" % loaded_native_path)
+print("  clean import: lmcache.cuda_ops -> %s" % loaded_native_path)
 
 for name in (
     "lmcache.lmcache_mooncake",
@@ -191,15 +196,25 @@ PY
 
 # --- imports ----------------------------------------------------------------
 gate_imports() {
-	python3 <<'PY'
+	local expected_lmcache="${LMCACHE_REF:-}"
+	if [[ -z "${expected_lmcache}" && -r "${LMCACHE_REF_FILE}" ]]; then
+		expected_lmcache="$(<"${LMCACHE_REF_FILE}")"
+	fi
+	[[ -n "${expected_lmcache}" ]] || \
+		die "LMCACHE_REF is unset and ${LMCACHE_REF_FILE} is missing"
+	LMCACHE_EXPECTED_VERSION="${expected_lmcache#v}" python3 <<'PY'
 import importlib
+import os
 from importlib.metadata import version
 
-if version("lmcache") != "0.5.3":
-    raise SystemExit("ERROR: expected lmcache 0.5.3, got %s" % version("lmcache"))
+expected = os.environ["LMCACHE_EXPECTED_VERSION"]
+if version("lmcache") != expected:
+    raise SystemExit(
+        "ERROR: expected lmcache %s, got %s" % (expected, version("lmcache"))
+    )
 
 for name in (
-    "lmcache.c_ops",
+    "lmcache.cuda_ops",
     "lmcache.lmcache_mooncake",
     "mooncake.engine",
     "mooncake.store",
@@ -207,7 +222,7 @@ for name in (
     importlib.import_module(name)
     print("  import: %s" % name)
 PY
-	echo "PASS: c_ops, lmcache_mooncake, mooncake.engine and mooncake.store import"
+	echo "PASS: cuda_ops, lmcache_mooncake, mooncake.engine and mooncake.store import"
 }
 
 # --- the MP adapters needed by the connector come from LMCache ---------------
@@ -325,7 +340,7 @@ import lmcache
 import mooncake
 
 for package, patterns in (
-    (lmcache, ("c_ops*.so", "lmcache_mooncake*.so")),
+    (lmcache, ("cuda_ops*.so", "lmcache_mooncake*.so")),
     (mooncake, ("engine*.so", "store*.so")),
 ):
     root = pathlib.Path(package.__path__[0])
