@@ -1,11 +1,11 @@
-# Build lmcache.c_ops with hipcc without forcing hipcc on every extension
+# Build lmcache.cuda_ops with hipcc without forcing hipcc on every extension
 #
-# LMCache collects the common C++ extensions, the ROCm c_ops extension, and the
-# optional host-only storage backends into a single build_ext command, so the
-# whole wheel is built by one process-global compiler.  A ROCm build therefore
-# had to run with CXX=hipcc, which also handed hipcc the host-only sources of
-# the optional Mooncake L2 backend (ASIO plus coroutine headers) and of the
-# common C++ extensions, which do not compile that way.
+# LMCache collects the common C++ extensions, the ROCm cuda_ops extension, and
+# the optional host-only storage backends into a single build_ext command, so
+# the whole wheel is built by one process-global compiler.  A ROCm build
+# therefore had to run with CXX=hipcc, which also handed hipcc the host-only
+# sources of the optional Mooncake L2 backend (ASIO plus coroutine headers) and
+# of the common C++ extensions, which do not compile that way.
 #
 # This patch makes the compiler a per-extension property instead:
 #
@@ -20,11 +20,14 @@
 #       carries the attribute; MAX_JOBS and ninja parallelism inside a single
 #       extension are unaffected.
 #
-#   setup_extensions/build_profiles/rocm.py  tags only lmcache.c_ops (its host
-#       .cpp sources include HIP headers) with the resolved hipcc, overridable
-#       through LMCACHE_ROCM_CXX, and returns the new command class.  Common
-#       C++ and any storage backend extension keep the base compiler, so a
-#       ROCm build can now run with CXX set to the ordinary host compiler.
+#   setup_extensions/build_profiles/rocm.py  tags only lmcache.cuda_ops (its
+#       host .cpp sources include HIP headers) with the resolved hipcc,
+#       overridable through LMCACHE_ROCM_CXX, and returns the new command
+#       class.  Common C++ and any storage backend extension keep the base
+#       compiler, so a ROCm build can now run with CXX set to the ordinary
+#       host compiler.  Rebased on LMCache v0.5.4, which renamed the GPU
+#       extension from lmcache.c_ops to lmcache.cuda_ops and moved its sources
+#       under csrc/cuda.
 #
 # tests/setup_extensions/test_build_ext.py covers the switch, restoration after
 # an exception, absent executable arrays on older setuptools, and the parallel
@@ -32,7 +35,7 @@
 #
 diff --git a/setup_extensions/build_ext.py b/setup_extensions/build_ext.py
 new file mode 100644
-index 0000000..616c11c
+index 00000000..6c693cfe
 --- /dev/null
 +++ b/setup_extensions/build_ext.py
 @@ -0,0 +1,178 @@
@@ -42,7 +45,7 @@ index 0000000..616c11c
 +Every LMCache extension is collected into a single ``build_ext`` command, so
 +one process-global compiler otherwise has to serve extensions with
 +incompatible toolchain requirements.  On ROCm the host ``.cpp`` sources of
-+``lmcache.c_ops`` include HIP headers and need ``hipcc``, while the common C++
++``lmcache.cuda_ops`` include HIP headers and need ``hipcc``, while the common C++
 +extensions and the optional host-only storage backends (Mooncake, for example,
 +pulls in ASIO and coroutine headers) must be built by the ordinary host
 +compiler.
@@ -215,44 +218,33 @@ index 0000000..616c11c
 +        _BUILD_EXTENSION = LMCacheBuildExtension
 +    return _BUILD_EXTENSION
 diff --git a/setup_extensions/build_profiles/rocm.py b/setup_extensions/build_profiles/rocm.py
-index 13f0d8e..061e5be 100644
+index 6355eb0d..0a16f78c 100644
 --- a/setup_extensions/build_profiles/rocm.py
 +++ b/setup_extensions/build_profiles/rocm.py
-@@ -2,25 +2,47 @@
+@@ -2,7 +2,9 @@
  """ROCm/HIP GPU backend profile.
--
-+
+
  Hipifies CUDA sources via ``torch.utils.hipify``, then builds
--``lmcache.c_ops`` with hipcc as the C++ compiler.
-+``lmcache.c_ops`` with hipcc as the C++ compiler.  hipcc is selected for that
-+one extension only (see ``setup_extensions/build_ext.py``); the common C++
+-``lmcache.cuda_ops`` with hipcc as the C++ compiler.
++``lmcache.cuda_ops`` with hipcc as the C++ compiler.  hipcc is selected for
++that one extension only (see ``setup_extensions/build_ext.py``); the common C++
 +extensions and the optional host-only storage backends keep the base compiler.
  """
--
-+
+
  # Standard
- from pathlib import Path
- from typing import TYPE_CHECKING, Optional
- import os
-+import shutil
--
-+
- if TYPE_CHECKING:
-     # Third Party
+@@ -16,6 +18,7 @@ if TYPE_CHECKING:
      from setuptools.extension import Extension
--
-+
+
  # First Party
 +from setup_extensions.build_ext import CXX_ATTR, lmcache_build_extension
  from setup_extensions.build_profiles import BuildProfile
--
-+
+
  ROOT_DIR = Path(__file__).parent.parent.parent
- HIPIFY_DIR = os.path.join(ROOT_DIR, "csrc/")
- HIPIFY_OUT_DIR = os.path.join(ROOT_DIR, "csrc_hip/")
--
-+
-+#: Environment override for the compiler that builds ``lmcache.c_ops``.
+@@ -23,6 +26,24 @@ CSRC_DIR = os.path.join(ROOT_DIR, "csrc")
+ HIPIFY_DIR = os.path.join(CSRC_DIR, "cuda")
+ HIPIFY_OUT_DIR = os.path.join(ROOT_DIR, "csrc_hip", "cuda")
+
++#: Environment override for the compiler that builds ``lmcache.cuda_ops``.
 +ROCM_CXX_ENV = "LMCACHE_ROCM_CXX"
 +
 +
@@ -270,17 +262,16 @@ index 13f0d8e..061e5be 100644
 +        return found
 +    return os.path.join(os.environ.get("ROCM_PATH", "/opt/rocm"), "bin", "hipcc")
 +
--
-+
- def _hipify_wrapper() -> list[str]:
-     """Run torch hipify on csrc/ and return hipified source paths."""
-@@ -99,26 +121,29 @@ class RocmProfile(BuildProfile):
-             "csrc/completion_recorder.cpp",
-         ]
+
+ def _hipify_wrapper(source_names: list[str]) -> list[str]:
+     """Hipify ``csrc/cuda`` and return paths for the requested source files.
+@@ -118,27 +139,30 @@ class RocmProfile(BuildProfile):
+             ]
+         )
          define_macros = [("__HIP_PLATFORM_HCC__", "1"), ("USE_ROCM", "1")]
 -        ext_modules = [
 -            cpp_extension.CppExtension(
--                "lmcache.c_ops",
+-                "lmcache.cuda_ops",
 -                sources=hip_sources,
 -                extra_compile_args={
 -                    "cxx": [
@@ -289,25 +280,27 @@ index 13f0d8e..061e5be 100644
 -                    ],
 -                },
 -                include_dirs=[
--                    os.path.join(os.environ.get("ROCM_PATH", "/opt/rocm"), "include")
-+        c_ops = cpp_extension.CppExtension(
-+            "lmcache.c_ops",
+-                    CSRC_DIR,
+-                    os.path.join(os.environ.get("ROCM_PATH", "/opt/rocm"), "include"),
+-                ],
+-                library_dirs=[
+-                    os.path.join(os.environ.get("ROCM_PATH", "/opt/rocm"), "lib")
++        cuda_ops = cpp_extension.CppExtension(
++            "lmcache.cuda_ops",
 +            sources=hip_sources,
 +            extra_compile_args={
 +                "cxx": [
 +                    "-O3",
 +                    "-std=c++17",
                  ],
--                library_dirs=[
--                    os.path.join(os.environ.get("ROCM_PATH", "/opt/rocm"), "lib")
--                ],
 -                define_macros=define_macros,
 -            ),
 -        ]
 -        cmdclass = {"build_ext": cpp_extension.BuildExtension}
 +            },
 +            include_dirs=[
-+                os.path.join(os.environ.get("ROCM_PATH", "/opt/rocm"), "include")
++                CSRC_DIR,
++                os.path.join(os.environ.get("ROCM_PATH", "/opt/rocm"), "include"),
 +            ],
 +            library_dirs=[
 +                os.path.join(os.environ.get("ROCM_PATH", "/opt/rocm"), "lib")
@@ -317,16 +310,15 @@ index 13f0d8e..061e5be 100644
 +        # Only this extension gets hipcc: its host .cpp sources include HIP
 +        # headers, and its device objects are linked by the same driver.  Any
 +        # other extension in the same build keeps the base compiler.
-+        setattr(c_ops, CXX_ATTR, _rocm_cxx())
-+        ext_modules = [c_ops]
++        setattr(cuda_ops, CXX_ATTR, _rocm_cxx())
++        ext_modules = [cuda_ops]
 +        cmdclass = {"build_ext": lmcache_build_extension()}
          return ext_modules, cmdclass
--
-+
+
      def requirements_file(self) -> Optional[str]:
 diff --git a/tests/setup_extensions/test_build_ext.py b/tests/setup_extensions/test_build_ext.py
 new file mode 100644
-index 0000000..25ceab1
+index 00000000..3aa24691
 --- /dev/null
 +++ b/tests/setup_extensions/test_build_ext.py
 @@ -0,0 +1,268 @@
@@ -529,7 +521,7 @@ index 0000000..25ceab1
 +
 +
 +def test_build_extensions_rejects_parallel_with_a_tagged_extension(clean_cxx):
-+    command = Command([FakeExtension("lmcache.c_ops", cxx="hipcc")], parallel=4)
++    command = Command([FakeExtension("lmcache.cuda_ops", cxx="hipcc")], parallel=4)
 +    with pytest.raises(RuntimeError, match="parallel"):
 +        command.build_extensions()
 +    assert command.built == []
@@ -550,12 +542,12 @@ index 0000000..25ceab1
 +    clean_cxx.setenv(CXX_ENV, "/usr/bin/g++")
 +    command = Command(
 +        [
-+            FakeExtension("lmcache.c_ops", cxx="/opt/rocm/bin/hipcc"),
++            FakeExtension("lmcache.cuda_ops", cxx="/opt/rocm/bin/hipcc"),
 +            FakeExtension("lmcache.lmcache_mooncake"),
 +        ]
 +    )
 +    command.build_extensions()
-+    assert command.built == ["lmcache.c_ops", "lmcache.lmcache_mooncake"]
++    assert command.built == ["lmcache.cuda_ops", "lmcache.lmcache_mooncake"]
 +    hip_env, hip_cxx, hip_link = command.seen[0]
 +    host_env, host_cxx, host_link = command.seen[1]
 +    assert hip_env == "/opt/rocm/bin/hipcc"
@@ -570,7 +562,7 @@ index 0000000..25ceab1
 +def test_a_failed_tagged_extension_restores_the_toolchain(clean_cxx):
 +    clean_cxx.setenv(CXX_ENV, "/usr/bin/g++")
 +    command = Command(
-+        [FakeExtension("lmcache.c_ops", cxx="hipcc")], fail_on="lmcache.c_ops"
++        [FakeExtension("lmcache.cuda_ops", cxx="hipcc")], fail_on="lmcache.cuda_ops"
 +    )
 +    with pytest.raises(RuntimeError, match="compile failed"):
 +        command.build_extensions()
@@ -585,16 +577,16 @@ index 0000000..25ceab1
 +# ---------------------------------------------------------------------------
 +
 +
-+def test_rocm_profile_tags_only_c_ops(monkeypatch):
++def test_rocm_profile_tags_only_cuda_ops(monkeypatch):
 +    pytest.importorskip("torch")
 +    monkeypatch.setenv("LMCACHE_ROCM_CXX", "/opt/rocm/bin/hipcc")
 +    # First Party
 +    from setup_extensions.build_ext import lmcache_build_extension
 +    from setup_extensions.build_profiles import rocm
 +
-+    monkeypatch.setattr(rocm, "_hipify_wrapper", lambda: [])
++    monkeypatch.setattr(rocm, "_hipify_wrapper", lambda source_names: [])
 +    ext_modules, cmdclass = rocm.RocmProfile().build()
-+    assert [ext.name for ext in ext_modules] == ["lmcache.c_ops"]
++    assert [ext.name for ext in ext_modules] == ["lmcache.cuda_ops"]
 +    assert getattr(ext_modules[0], CXX_ATTR) == "/opt/rocm/bin/hipcc"
 +    assert cmdclass["build_ext"] is lmcache_build_extension()
 +    assert issubclass(cmdclass["build_ext"], PerExtensionCompilerMixin)

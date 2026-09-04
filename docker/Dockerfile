@@ -554,7 +554,7 @@ RUN cd /app/LMCache && \
         fi; \
     done
 
-# Build ONE LMCache wheel carrying both native extensions (the HIP c_ops and
+# Build ONE LMCache wheel carrying both native extensions (the HIP cuda_ops and
 # the host-only Mooncake L2 backend) and install THAT, instead of
 # `pip install -e .`, so the wheel we publish is byte-for-byte what the image
 # runs.  The wheel lands in /wheels (extracted by the `wheels` stage below).
@@ -562,7 +562,7 @@ RUN cd /app/LMCache && \
 # Compilers: LMCache collects every extension into a single build_ext, so one
 # global CXX used to have to serve both the HIP sources and the host-only ones.
 # 15-lmcache-per-extension-cxx.patch makes the compiler a per-extension
-# property: the base compiler is g++, and only lmcache.c_ops is switched to
+# property: the base compiler is g++, and only lmcache.cuda_ops is switched to
 # LMCACHE_ROCM_CXX (hipcc) for its own compile and link.  Do not reintroduce a
 # global CXX=hipcc: it would hand hipcc the Mooncake and common C++ sources.
 #
@@ -736,7 +736,12 @@ ENV PYTHONUNBUFFERED=1 \
 
 # Prove the installed artifacts in the final package and loader environment,
 # after the intentional CUDA-package cleanup and the source NIXL install.
-RUN MOONCAKE_PREFIX="${MOONCAKE_PREFIX}" \
+# LMCACHE_REF is a build argument the image does not keep, so record it for the
+# standalone re-run of the same gates (see the script header).
+RUN mkdir -p /etc/aic && \
+    printf '%s\n' "${LMCACHE_REF}" > /etc/aic/lmcache-ref && \
+    MOONCAKE_PREFIX="${MOONCAKE_PREFIX}" \
+    LMCACHE_REF="${LMCACHE_REF}" \
     /usr/local/bin/aic-mooncake-gates.sh runtime
 
 # Provide image metadata. AIC_VERSION is declared and used here — after all
