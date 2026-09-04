@@ -218,8 +218,13 @@ RUN --mount=type=cache,target=/root/.cache/go-build,sharing=locked \
 # upstream moved it: it used to be built and installed into /usr/local by
 # dependencies.sh, and as of the pinned revision CMake fetches it into the
 # build tree (mooncake-common/FindYLT.cmake) with EXCLUDE_FROM_ALL, so it is
-# never installed.  The `include/ylt` assertion below is what actually proves
-# one of the two paths landed.
+# never installed.  The install rule that used to run also flattened the
+# vendored trees (include/ylt/thirdparty and include/ylt/standalone) into the
+# include root, which is the layout the store headers expect: real_client.h
+# includes <async_simple/coro/Lazy.h>, not <ylt/thirdparty/async_simple/...>.
+# Mirror that flattening for the fetched tree.  The `include/ylt` and
+# `include/async_simple` assertions below are what actually prove one of the
+# two paths landed.
 RUN set -eu; \
     src=/src/Mooncake; \
     include="${MOONCAKE_PREFIX}/include"; \
@@ -230,6 +235,11 @@ RUN set -eu; \
     if [ -n "${ylt_include}" ]; then \
         echo "Staging yalantinglibs headers from ${ylt_include}"; \
         cp -a "${ylt_include}/." "${include}/"; \
+        for vendored in thirdparty standalone; do \
+            if [ -d "${ylt_include}/ylt/${vendored}" ]; then \
+                cp -a "${ylt_include}/ylt/${vendored}/." "${include}/"; \
+            fi; \
+        done; \
     fi; \
     cp -a "${src}/mooncake-transfer-engine/include/." "${include}/"; \
     cp -a "${src}/mooncake-common/include/." "${include}/"; \
@@ -251,7 +261,8 @@ RUN set -eu; \
         include/real_client.h \
         include/transfer_engine.h \
         include/cachelib_memory_allocator/Slab.h \
-        include/ylt/struct_pack.hpp; do \
+        include/ylt/struct_pack.hpp \
+        include/async_simple/coro/Lazy.h; do \
         [ -e "${MOONCAKE_PREFIX}/${required}" ] || \
             { echo "ERROR: staged SDK is missing ${required}" >&2; exit 1; }; \
     done; \
