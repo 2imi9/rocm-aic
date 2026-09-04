@@ -41,7 +41,7 @@
 #   make build                                  # no proxy
 #   make build TLS_CERT=/path/to/corp-ca.crt   # behind proxy
 #
-# Patches: every *.patch under patches/lmcache/ and patches/nixl/ is applied to
+# Patches: every *.patch under patches/vllm/, patches/lmcache/, and patches/nixl/ is applied to
 # its upstream checkout during the build, in lexical (filename) order -- hence
 # the NN- prefixes.  Drop a new NN-*.patch into the directory to include it.
 #
@@ -294,7 +294,7 @@ ARG BUILD_JOBS=
 # vLLM: built from source at this tag.  Check https://github.com/vllm-project/vllm/tags
 # for the latest release; bump VLLM_REF and rebuild when updating.
 ARG VLLM_GIT_URL=https://github.com/vllm-project/vllm.git
-ARG VLLM_REF=v0.26.0
+ARG VLLM_REF=v0.27.1
 
 # Pinned component revisions — bump together when validating a new combo.
 # ai-dynamo/nixl release tag + nixl-rocm-ais-mt.patch (ROCm/HIP + AIS_MT).
@@ -307,11 +307,11 @@ ARG NIXL_REF=v1.3.2
 ARG HSA_SNOOP_GIT_URL=https://github.com/sbates130272/hsa-snoop.git
 ARG HSA_SNOOP_REF=v1.0.0
 
-# LMCache: upstream repo, pinned to the v0.5.3 release tag.
+# LMCache: upstream repo, pinned to the v0.5.4 release tag.
 # All 16 AMD patches in patches/lmcache/ apply cleanly against this tag.
 # Note: LMCache v0.5.2+ is required for vLLM >= 0.26.0.
 ARG LMCACHE_GIT_URL=https://github.com/LMCache/LMCache.git
-ARG LMCACHE_REF=v0.5.3
+ARG LMCACHE_REF=v0.5.4
 
 # Optional: enable UCX fast-path for NIXL (default off).
 ARG AIC_UCX_FAST=
@@ -412,7 +412,7 @@ RUN curl -fsSL "https://astral.sh/uv/${UV_VERSION}/install.sh" | sh && \
 # UNBLOCK (2026-08-03): torch 2.12.0+rocm7.14.0 from repo.amd.com ships
 # Triton 3.7.1 which triggers hipErrorInvalidImage on SPUR gfx950 nodes
 # (amdgpu/KFD 6.14.14 host driver).  The pytorch.org rocm7.2 wheel ships
-# a Triton version compatible with vLLM 0.26.0 and the current SPUR KFD.
+# a Triton version compatible with vLLM 0.27.1 and the current SPUR KFD.
 # Revert to repo.amd.com once the SPUR nodes are upgraded to a KFD that
 # supports ROCm 7.14 compiled kernels.
 #
@@ -453,7 +453,9 @@ COPY patches/vllm/ /app/patches/vllm/
 
 # Patch setup.py so _is_hip() short-circuits on VLLM_TARGET_DEVICE=rocm at
 # build time, without probing torch.version.hip before it is installed.
-RUN sed -i 's/def _is_hip() -> bool:/def _is_hip() -> bool:\n    if VLLM_TARGET_DEVICE == "rocm":\n        return True/' /app/vllm/setup.py
+RUN sed -i 's/def _is_hip() -> bool:/def _is_hip() -> bool:\n    if VLLM_TARGET_DEVICE == "rocm":\n        return True/' /app/vllm/setup.py && \
+    grep -A2 '^def _is_hip() -> bool:$' /app/vllm/setup.py | \
+        grep -Fxq '    if VLLM_TARGET_DEVICE == "rocm":'
 
 # Apply every patch under patches/vllm/ in lexical order.
 RUN cd /app/vllm && \
@@ -485,7 +487,8 @@ RUN --mount=type=cache,target=/root/.cache/pip \
         CCACHE_DIR=/root/.cache/ccache \
         VLLM_VERSION_OVERRIDE="${VLLM_REF#v}+rocm" \
         pip3 wheel --no-build-isolation --no-deps --no-cache-dir -w /wheels . && \
-    pip3 install --no-cache-dir /wheels/vllm-*.whl
+    pip3 install --no-cache-dir --no-deps /wheels/vllm-*.whl && \
+    python3 -c 'import torch; assert torch.version.hip, "Expected a ROCm torch build"'
 
 # ----- 3b. Mooncake SDK + ROCm wheel (from the mooncake-build stage) ---------
 # Declared here, after the expensive torch/vLLM layers: re-pinning Mooncake

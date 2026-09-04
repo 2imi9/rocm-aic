@@ -7,7 +7,7 @@
 # the versions pinned in the Dockerfile.
 #
 # Emits just the tag component (no image name) in the following format:
-#   0.1.0-rocm7.14.0-vllm0.26.0-lmcache0.5.3-mooncake7197358-nixl1.3.2-hsasnoop1.0.0
+#   0.1.0-rocm7.14.0-vllm0.27.1-lmcache0.5.4-mooncake7197358-nixl1.3.2-hsasnoop1.0.0
 # Where 0.1.0 represents the AIC version.  Mooncake is pinned by commit, so it
 # contributes the first 7 characters of MOONCAKE_REF.
 #

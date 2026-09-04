@@ -73,9 +73,39 @@ export AIC_CI_ACTIVE_JOB_FILE="${JOB_FILE}"
 _best_effort_remove() {
     rm -rf "$@" || echo "WARNING: cleanup could not fully remove: $*" >&2
 }
+
+# Save stderr of run-build-distribute.sh that would otherwise be deleted upon
+# cleanup for CI debugging.
+_archive_job_logs() {
+    local archive="${CI_STORAGE_ROOT}/joblogs/${SHORT}.${AIC_CI_RUN_KEY}.${AIC_CI_STAGE}"
+    local -a srcs=()
+    shopt -s nullglob
+    srcs=("${WORKDIR}"/logs/* "${WORKDIR}"/spur-*.out)
+    shopt -u nullglob
+    (( ${#srcs[@]} > 0 )) || return 0
+    if ! mkdir -p "${archive}"; then
+        echo "WARNING: cannot create ${archive}; SPUR job logs will be lost" >&2
+        return 0
+    fi
+    cp -a "${srcs[@]}" "${archive}/" ||
+        echo "WARNING: some SPUR job logs could not be archived to ${archive}" >&2
+    echo "=== SPUR job logs kept at $(hostname):${archive} ==="
+    # Bounded retention -- this is shared, quota'd NFS.  A failure here silently
+    # leaks quota until it breaks unrelated jobs, so report it; do not let it
+    # fail the cleanup path, which is already handling an earlier failure.
+    local prune_err="" prune_rc=0
+    prune_err=$(find "${CI_STORAGE_ROOT}/joblogs" -mindepth 1 -maxdepth 1 -type d \
+        -mtime +14 -exec rm -rf {} + 2>&1 >/dev/null) || prune_rc=$?
+    if (( prune_rc != 0 )) || [[ -n "${prune_err}" ]]; then
+        echo "WARNING: could not expire SPUR job logs older than 14d under" \
+            "${CI_STORAGE_ROOT}/joblogs (rc=${prune_rc}): ${prune_err:-no error output}" >&2
+    fi
+}
+
 _cleanup() {
     local rc=$?
     trap - EXIT
+    (( rc == 0 )) || _archive_job_logs
     echo "=== Cleaning up run-attempt worktree ==="
     _best_effort_remove "${WORKDIR}"
     if (( rc != 0 )) || [[ "${KEEP_ARTIFACTS}" != "1" ]]; then

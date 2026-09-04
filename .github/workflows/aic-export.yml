@@ -106,7 +106,7 @@ jobs:
           ARG VLLM_GIT_URL=https://github.com/vllm-project/vllm.git
           ARG VLLM_REF=v0.26.0
           ARG LMCACHE_GIT_URL=https://github.com/LMCache/LMCache.git
-          ARG LMCACHE_REF=v0.5.3
+          ARG LMCACHE_REF=v0.5.4
           ARG MOONCAKE_GIT_URL=https://github.com/kvcache-ai/Mooncake.git
           ARG MOONCAKE_REF=0123456789abcdef
           ARG NIXL_GIT_URL=https://github.com/ai-dynamo/nixl.git
@@ -115,8 +115,8 @@ jobs:
           full_args=("${fixtures}/Dockerfile.full" "${args[@]:1}")
           full="$(bash "${renderer}" "${full_args[@]}")"
           printf '%s\n' "${full}" | grep -F -- '- **Base:** rocm/dev-ubuntu-24.04:7.14.0-full (ROCm 7.14.0, Python 3.12, x86_64)'
-          printf '%s\n' "${full}" | grep -F -- "- **vLLM:** https://github.com/vllm-project/vllm.git @ ${markdown_tick}v0.26.0${markdown_tick} (source build)"
-          printf '%s\n' "${full}" | grep -F -- "- **LMCache:** https://github.com/LMCache/LMCache.git @ ${markdown_tick}v0.5.3${markdown_tick} + AIC patches"
+          printf '%s\n' "${full}" | grep -F -- "- **vLLM:** https://github.com/vllm-project/vllm.git @ ${markdown_tick}v0.27.1${markdown_tick} (source build)"
+          printf '%s\n' "${full}" | grep -F -- "- **LMCache:** https://github.com/LMCache/LMCache.git @ ${markdown_tick}v0.5.4${markdown_tick} + AIC patches"
           printf '%s\n' "${full}" | grep -F -- "- **Mooncake:** https://github.com/kvcache-ai/Mooncake.git @ ${markdown_tick}0123456789abcdef${markdown_tick} (ROCm source build)"
 
           grep -v '^ARG NIXL_REF=' "${fixtures}/Dockerfile.full" > "${fixtures}/Dockerfile.missing-ref"
