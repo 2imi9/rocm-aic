@@ -16,3 +16,6 @@ auditwheel==6.8.0
 packaging==26.3
 pyproject-hooks==1.2.0
 pyelftools==0.33
+# build_wheel.sh installs patchelf from PyPI next to auditwheel: auditwheel
+# >= 6.8 needs patchelf >= 0.14.5, newer than the distro package it replaces.
+patchelf==0.19.1.0
