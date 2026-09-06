@@ -76,7 +76,13 @@ ARG GO_AMD64_SHA256=00859d7bd6defe8bf84d9db9e57b9a4467b2887c18cd93ae7460e713db77
 # see the NIXL isolation probe in stage 6.
 ARG MOONCAKE_PREFIX=/opt/mooncake-sdk
 
-# An optional named context with this name overrides the empty default stage.
+# Empty default for the `pip-wheels` build context.  The torch install step
+# mounts that context (--mount=from=pip-wheels) to reuse a host wheel cache and
+# already falls back to the index when the wheel is absent, but BuildKit
+# resolves the name against a named context first and a stage second; with
+# neither it tries to pull docker.io/library/pip-wheels and the build fails
+# before the fallback can run.  A caller that passes
+# --build-context pip-wheels=<dir> overrides this stage exactly as before.
 FROM scratch AS pip-wheels
 
 # ----- Stage M. Mooncake (source build at the pinned commit) -----------------
