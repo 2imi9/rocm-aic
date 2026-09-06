@@ -108,14 +108,17 @@ RUN --mount=type=secret,id=tls_cert,required=false \
         update-ca-certificates; \
     fi
 
-# git must exist before the clone, and pip must be importable before upstream's
-# wheel script bootstraps its build frontend.  Everything else is installed by
+# git must exist before the clone, pip must be importable before upstream's
+# wheel script bootstraps its build frontend, and patchelf rewrites the staged
+# SDK's RUNPATH below (dependencies.sh installs it too, but the SDK stage must
+# not depend on upstream's package list).  Everything else is installed by
 # Mooncake's own dependencies.sh below.
 RUN apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         ca-certificates \
         curl \
         git \
+        patchelf \
         python3-pip \
     && rm -rf /var/lib/apt/lists/*
 
@@ -225,6 +228,15 @@ RUN --mount=type=cache,target=/root/.cache/go-build,sharing=locked \
 # Mirror that flattening for the fetched tree.  The `include/ylt` and
 # `include/async_simple` assertions below are what actually prove one of the
 # two paths landed.
+#
+# The libraries need each other by soname (libmooncake_store -> libtransfer_engine
+# -> libmooncake_common -> libasio, plus libetcd_wrapper), but CMake installs
+# them with no self-referential RUNPATH, so a copy of the tree resolves its
+# siblings only through whatever else happens to be on the loader path.  Give
+# every staged library the RUNPATH upstream's wheel script gives the wheel
+# copies ($ORIGIN), keep the ROCm runtime directory CMake already chose for the
+# transfer engine, and prove the result resolves with nothing else on the path.
+# hadolint ignore=SC2016
 RUN set -eu; \
     src=/src/Mooncake; \
     include="${MOONCAKE_PREFIX}/include"; \
@@ -265,6 +277,14 @@ RUN set -eu; \
         include/async_simple/coro/Lazy.h; do \
         [ -e "${MOONCAKE_PREFIX}/${required}" ] || \
             { echo "ERROR: staged SDK is missing ${required}" >&2; exit 1; }; \
+    done; \
+    for lib in "${MOONCAKE_PREFIX}"/lib/*.so; do \
+        patchelf --set-rpath '$ORIGIN:/opt/rocm/lib' "${lib}"; \
+        if ldd "${lib}" | grep -q 'not found'; then \
+            echo "ERROR: staged SDK library has unresolved dependencies: ${lib}" >&2; \
+            ldd "${lib}" | grep 'not found' >&2; \
+            exit 1; \
+        fi; \
     done; \
     echo "PASS: Mooncake SDK staged at ${MOONCAKE_PREFIX}"
 
