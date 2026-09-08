@@ -23,8 +23,8 @@
 #
 # The `exporters` profile adds: node-exporter (:9100), amdgpu-exporter (:5000),
 # and hsa-snoop (:9488) -- the last from the AIC image (set IMAGE_NAME to its tag).
-# hsa-snoop v1.0.0 exports both HSA dispatch metrics (hsa_*) and AIS P2P storage
-# metrics (ais_rx_ops_total, ais_tx_bytes_total, etc.) on the same :9488 endpoint.
+# hsa-snoop v1.1.0 exports HSA dispatch, SDMA, and AIS P2P storage metrics on the
+# same :9488 endpoint.
 #
 # Required env:
 #   AIC_METRICS_DIR — host path (bind-mount an NFS dir here) for the Prometheus TSDB
@@ -166,7 +166,8 @@ services:
   # hsa-snoop (exporters profile): HSA AQL queue/dispatch snooper with a
   # Prometheus exporter on :9488. Exports both HSA dispatch metrics (hsa_*) and
   # AIS (AMD Infinity Storage) P2P storage metrics (ais_rx_ops_total,
-  # ais_tx_bytes_total, etc.) from v1.0.0 onward.  Userspace GPU telemetry
+  # ais_tx_bytes_total, etc.), plus SDMA metrics from v1.1.0 onward.  Userspace
+  # GPU telemetry
   # (ftrace kprobe + pagemap + process_vm_readv) -- must run as root, PRIVILEGED,
   # in the host PID namespace to see the vLLM/LMCache GPU processes. Ships in the
   # AIC image (built with -DHSA_SNOOP_PROMETHEUS=ON; see Dockerfile step 6b).
