@@ -105,7 +105,8 @@ scrape_configs:
   # ais_tx_ops_total, ais_rx_bytes_total, ais_tx_bytes_total,
   # ais_rx_errors_total, ais_tx_errors_total, ais_rx_latency_seconds,
   # ais_tx_latency_seconds, ais_rx_io_size_bytes, ais_tx_io_size_bytes) --
-  # both metric families served on the same :9488 endpoint from v1.0.0.
+  # all metric families are served on the same :9488 endpoint; SDMA metrics
+  # are available from v1.1.0.
   # hsa-snoop: host service (or monitoring compose exporters profile).
   # Reached via host-gateway since it holds tracefs exclusively on the host.
   - job_name: hsa_snoop

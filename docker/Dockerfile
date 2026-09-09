@@ -342,7 +342,7 @@ ARG NIXL_REF=v1.3.2
 
 # hsa-snoop: HSA AQL queue/dispatch snooper + Prometheus exporter (includes AIS metrics).
 ARG HSA_SNOOP_GIT_URL=https://github.com/sbates130272/hsa-snoop.git
-ARG HSA_SNOOP_REF=v1.0.0
+ARG HSA_SNOOP_REF=v1.1.0
 
 # LMCache: upstream repo, pinned to the v0.5.4 release tag.
 # All 16 AMD patches in patches/lmcache/ apply cleanly against this tag.
@@ -726,7 +726,8 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # ----- 6b. hsa-snoop (HSA AQL queue snooper + Prometheus exporter) -----------
 # GPU dispatch/queue telemetry on :9488 (/metrics), including AIS (AMD Infinity
 # Storage) P2P metrics (ais_rx_ops_total, ais_tx_bytes_total, etc.) added in
-# v1.0.0.  The snooper binary is host-only C++ (x86-64) and ARCH-INDEPENDENT --
+# v1.0.0.  The v1.1.0 release also exposes SDMA telemetry.  The snooper binary
+# is host-only C++ (x86-64) and ARCH-INDEPENDENT --
 # it parses HSA AQL queues and AIS ioctls from userspace, so one binary runs on
 # every gfx target we ship.  We disable the optional examples/
 # (CMAKE_DISABLE_FIND_PACKAGE_hip=ON): they compile HIP device code
