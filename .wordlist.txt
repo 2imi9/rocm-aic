@@ -59,6 +59,7 @@ ZMQ
 aic
 ais
 amd
+amdsmi
 ansible
 arg
 args

@@ -6,6 +6,7 @@
 #SBATCH --job-name=aic-ext-hit-test
 
 set -euo pipefail
+export PATH="/usr/local/bin:${PATH}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="${SLURM_SUBMIT_DIR:-$(cd "${SCRIPT_DIR}/.." && pwd)}"

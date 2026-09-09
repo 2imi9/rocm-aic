@@ -29,6 +29,7 @@ aic_ci_session_init() {
 
 aic_ci_ssh_bash() {
     ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=4 "${AIC_SPUR_HOST}" env \
+        PATH="/usr/local/bin:\${PATH}" \
         AIC_CI_RUN_KEY="${AIC_CI_RUN_KEY}" \
         AIC_CI_STAGE="${AIC_CI_STAGE}" \
         "$@" \
@@ -50,6 +51,7 @@ _aic_ci_session_exit() {
             AIC_SPUR_CONTROLLER="${AIC_SPUR_CONTROLLER}" \
             bash <<'REMOTE_CANCEL' || true
 set -u
+export PATH="/usr/local/bin:${PATH}"
 
 CI_STORAGE_ROOT="${AIC_CI_STORAGE_ROOT:-$HOME/Projects/rocm-aic-ci}"
 CONTROL_PREFIX="${CI_STORAGE_ROOT}/control/${AIC_CI_SHORT_SHA}.${AIC_CI_RUN_KEY}.${AIC_CI_STAGE}"

@@ -33,6 +33,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          export PATH="/usr/local/bin:${PATH}"
           [[ "${JOB_ID}" =~ ^[0-9]+$ ]] || {
             echo "ERROR: Slurm job ID must be numeric" >&2
             exit 2
@@ -42,6 +43,7 @@ jobs:
             AIC_SPUR_CONTROLLER="${AIC_SPUR_CONTROLLER}" \
             bash <<'REMOTE'
           set -euo pipefail
+          export PATH="/usr/local/bin:${PATH}"
           scancel --controller="${AIC_SPUR_CONTROLLER}" "${JOB_ID}"
           for _ in 1 2 3 4 5 6 7 8 9 10; do
               if ! squeue --controller="${AIC_SPUR_CONTROLLER}" -h 2>/dev/null |

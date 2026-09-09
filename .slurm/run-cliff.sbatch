@@ -72,6 +72,7 @@
 # A provisioned mount is left mounted for reuse by later jobs on the same node.
 #
 set -uo pipefail
+export PATH="/usr/local/bin:${PATH}"
 
 # --- Config (all overridable via environment) --------------------------------
 # Under sbatch, Slurm copies this script to the node's spool dir and runs it from
