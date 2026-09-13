@@ -3,6 +3,8 @@
 [![MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://github.com/ROCm/rocm-aic/blob/main/LICENSE.md)
 [![Platform](https://img.shields.io/badge/platform-linux-lightgrey.svg)](README.md)
 [![ROCm](https://img.shields.io/badge/ROCm-7.14.1-green.svg)](https://rocm.docs.amd.com)
+[![PyTorch](https://img.shields.io/badge/PyTorch-2.13-ee4c2c.svg)](https://github.com/ROCm/pytorch/tree/release/2.13)
+[![AITER](https://img.shields.io/badge/AITER-v0.1.19-blue.svg)](https://github.com/ROCm/aiter/tree/v0.1.19)
 [![vLLM](https://img.shields.io/badge/vLLM-v0.28.0-blue.svg)](https://github.com/vllm-project/vllm)
 [![LMCache](https://img.shields.io/badge/LMCache-v0.5.4-blue.svg)](https://github.com/LMCache/LMCache)
 [![NIXL](https://img.shields.io/badge/NIXL-v1.4.1-blue.svg)](https://github.com/ai-dynamo/nixl)
@@ -42,8 +44,9 @@ platform.
 | Component | Source | Ref |
 | --- | --- | --- |
 | Base OS | `rocm/dev-ubuntu-24.04:7.14.1-full` | Ubuntu 24.04, ROCm 7.14, Python 3.12 |
+| PyTorch | `ROCm/pytorch` (source build) | `release/2.13` |
 | vLLM | `github.com/vllm-project/vllm` (source build) | `v0.28.0` + 3 AMD patches |
-| AITER | `ROCm/aiter` (official ROCm 7.2 wheel) | `v0.1.19` (vLLM ROCm-validated) |
+| AITER | `ROCm/aiter` (source build) | `v0.1.19` (vLLM ROCm-validated) |
 | FlashAttention | `Dao-AILab/flash-attention` (source build) | `0e60e394` (vLLM ROCm-validated) |
 | LMCache | `LMCache/LMCache` (upstream) | `v0.5.4` + 16 AMD patches |
 | NIXL | `ai-dynamo/nixl` (upstream) | `v1.4.1` + `nixl-rocm-ais-mt.patch` |
