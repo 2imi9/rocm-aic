@@ -3,7 +3,7 @@
 [![MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://github.com/ROCm/rocm-aic/blob/main/LICENSE.md)
 [![Platform](https://img.shields.io/badge/platform-linux-lightgrey.svg)](README.md)
 [![ROCm](https://img.shields.io/badge/ROCm-7.14.1-green.svg)](https://rocm.docs.amd.com)
-[![PyTorch](https://img.shields.io/badge/PyTorch-2.13-ee4c2c.svg)](https://github.com/ROCm/pytorch/tree/release/2.13)
+[![PyTorch](https://img.shields.io/badge/PyTorch-release%2F2.13-ee4c2c.svg)](https://github.com/ROCm/pytorch/tree/release/2.13)
 [![AITER](https://img.shields.io/badge/AITER-v0.1.19-blue.svg)](https://github.com/ROCm/aiter/tree/v0.1.19)
 [![vLLM](https://img.shields.io/badge/vLLM-v0.28.0-blue.svg)](https://github.com/vllm-project/vllm)
 [![LMCache](https://img.shields.io/badge/LMCache-v0.5.4-blue.svg)](https://github.com/LMCache/LMCache)

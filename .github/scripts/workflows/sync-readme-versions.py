@@ -22,7 +22,9 @@ README = REPO_ROOT / "README.md"
 REQUIRED_ARGS = (
     "ROCM_VERSION",
     "ROCM_BASE_IMAGE",
+    "PYTORCH_BRANCH",
     "VLLM_REF",
+    "AITER_REF",
     "LMCACHE_REF",
     "NIXL_REF",
     "HSA_SNOOP_REF",
@@ -146,7 +148,9 @@ def render_readme(dockerfile_text: str, readme_text: str) -> tuple[str, list[str
         ensure_table_safe("NIXL patch filename", patch.name, patch)
     nixl_patch_summary = " + ".join(f"`{patch.name}`" for patch in nixl_patches)
     rocm_short = ".".join(rocm.split(".")[:2])
+    pytorch = values["PYTORCH_BRANCH"]
     vllm = values["VLLM_REF"]
+    aiter = values["AITER_REF"]
     lmcache = values["LMCACHE_REF"]
     nixl = values["NIXL_REF"]
     hsa = values["HSA_SNOOP_REF"]
@@ -157,6 +161,16 @@ def render_readme(dockerfile_text: str, readme_text: str) -> tuple[str, list[str
             "ROCm badge",
             r"^\[!\[ROCm\]\(https://img\.shields\.io/badge/ROCm-[^\s/)]+-green\.svg\)\]\(https://rocm\.docs\.amd\.com\)$",
             f"[![ROCm](https://img.shields.io/badge/ROCm-{shield_value(rocm)}-green.svg)](https://rocm.docs.amd.com)",
+        ),
+        (
+            "PyTorch badge",
+            r"^\[!\[PyTorch\]\(https://img\.shields\.io/badge/PyTorch-[^\s/)]+-ee4c2c\.svg\)\]\(https://github\.com/ROCm/pytorch/tree/[^\s)]+\)$",
+            f"[![PyTorch](https://img.shields.io/badge/PyTorch-{shield_value(pytorch)}-ee4c2c.svg)](https://github.com/ROCm/pytorch/tree/{pytorch})",
+        ),
+        (
+            "AITER badge",
+            r"^\[!\[AITER\]\(https://img\.shields\.io/badge/AITER-[^\s/)]+-blue\.svg\)\]\(https://github\.com/ROCm/aiter/tree/[^\s)]+\)$",
+            f"[![AITER](https://img.shields.io/badge/AITER-{shield_value(aiter)}-blue.svg)](https://github.com/ROCm/aiter/tree/{aiter})",
         ),
         (
             "vLLM badge",
@@ -184,9 +198,19 @@ def render_readme(dockerfile_text: str, readme_text: str) -> tuple[str, list[str
             f"| Base OS | `{rocm_base}` | Ubuntu 24.04, ROCm {rocm_short}, Python 3.12 |",
         ),
         (
+            "PyTorch row",
+            r"^\| PyTorch \| `ROCm/pytorch` \(source build\) \| `[^`]+` \|$",
+            f"| PyTorch | `ROCm/pytorch` (source build) | `{pytorch}` |",
+        ),
+        (
             "vLLM row",
             r"^\| vLLM \| `github\.com/vllm-project/vllm` \(source build\) \| `[^`]+` \+ [0-9]+ AMD patches \|$",
             f"| vLLM | `github.com/vllm-project/vllm` (source build) | `{vllm}` + {len(vllm_patches)} AMD patches |",
+        ),
+        (
+            "AITER row",
+            r"^\| AITER \| `ROCm/aiter` \(source build\) \| `[^`]+` \(vLLM ROCm-validated\) \|$",
+            f"| AITER | `ROCm/aiter` (source build) | `{aiter}` (vLLM ROCm-validated) |",
         ),
         (
             "LMCache row",
