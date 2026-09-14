@@ -108,7 +108,7 @@ services:
   # ---------------------------------------------------------------------------
   # nvme-exporter (exporters-fabric profile): dedicated NVMe metrics on :9998.
   # No published upstream image (the batesste role installs a host binary), so we
-  # build one from ./nvme-exporter/Dockerfile:
+  # build one from ../docker/nvme-exporter/Dockerfile:
   #   docker compose -f monitoring/docker-compose.monitoring.yml \
   #     --profile exporters-fabric build nvme-exporter
   # Override AIC_NVME_EXPORTER_IMAGE to use a prebuilt/pushed tag instead.  Kept
@@ -116,7 +116,7 @@ services:
   # ---------------------------------------------------------------------------
   nvme-exporter:
     build:
-      context: ./nvme-exporter
+      context: ../docker/nvme-exporter
     # `:-` (not `:?`) default: Compose interpolates mandatory vars at parse time
     # for the WHOLE file before profile filtering, so a `:?` here would abort
     # `--profile exporters` runs that never touch this service.  A concrete
@@ -138,14 +138,14 @@ services:
   # ---------------------------------------------------------------------------
   # rdma-exporter (exporters-fabric profile): yuuki-style sysfs RDMA metrics on
   # :9879.  No published upstream image, so we build one from
-  # ./rdma-exporter/Dockerfile:
+  # ../docker/rdma-exporter/Dockerfile:
   #   docker compose -f monitoring/docker-compose.monitoring.yml \
   #     --profile exporters-fabric build rdma-exporter
   # Override AIC_RDMA_EXPORTER_IMAGE to use a prebuilt/pushed tag instead.
   # ---------------------------------------------------------------------------
   rdma-exporter:
     build:
-      context: ./rdma-exporter
+      context: ../docker/rdma-exporter
     # `:-` (not `:?`) default -- see nvme-exporter above: `:?` would abort
     # unrelated `--profile exporters` runs at parse time.  Concrete default tag
     # matches the built image; only built/pulled under `exporters-fabric`.

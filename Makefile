@@ -737,10 +737,10 @@ monitoring-logs:
 monitoring-build-exporters:
 	DOCKER_BUILDKIT=1 docker build \
 		--build-arg NVME_EXPORTER_VERSION=$(NVME_EXPORTER_VERSION) \
-		-t "$(NVME_EXPORTER_IMAGE)" "$(CURDIR)/monitoring/nvme-exporter"
+		-t "$(NVME_EXPORTER_IMAGE)" "$(CURDIR)/docker/nvme-exporter"
 	DOCKER_BUILDKIT=1 docker build \
 		--build-arg RDMA_EXPORTER_VERSION=$(RDMA_EXPORTER_VERSION) \
-		-t "$(RDMA_EXPORTER_IMAGE)" "$(CURDIR)/monitoring/rdma-exporter"
+		-t "$(RDMA_EXPORTER_IMAGE)" "$(CURDIR)/docker/rdma-exporter"
 	@echo "Built $(NVME_EXPORTER_IMAGE) and $(RDMA_EXPORTER_IMAGE)."
 	@echo "Run them via:  AIC_EXPORTERS=1 with --profile exporters-fabric, or set"
 	@echo "AIC_NVME_EXPORTER_IMAGE / AIC_RDMA_EXPORTER_IMAGE for the .slurm docker-run path."

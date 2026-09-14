@@ -1067,7 +1067,7 @@ tmp="${nvme_tar}.partial.\$\$"
 set +o pipefail
 docker buildx build --builder ${AIC_BUILDX_BUILDER} --output type=docker,dest=- \
     --build-arg NVME_EXPORTER_VERSION="${AIC_NVME_EXPORTER_VERSION}" \
-    -t "${AIC_NVME_EXPORTER_IMAGE}" "${AIC_DAY_DIR}/monitoring/nvme-exporter" | ${COMPRESS_CMD} > "\${tmp}"
+    -t "${AIC_NVME_EXPORTER_IMAGE}" "${AIC_DAY_DIR}/docker/nvme-exporter" | ${COMPRESS_CMD} > "\${tmp}"
 _rc=("\${PIPESTATUS[@]}")
 set -o pipefail
 if [ "\${_rc[1]}" -ne 0 ]; then
@@ -1081,7 +1081,7 @@ tmp="${rdma_tar}.partial.\$\$"
 set +o pipefail
 docker buildx build --builder ${AIC_BUILDX_BUILDER} --output type=docker,dest=- \
     --build-arg RDMA_EXPORTER_VERSION="${AIC_RDMA_EXPORTER_VERSION}" \
-    -t "${AIC_RDMA_EXPORTER_IMAGE}" "${AIC_DAY_DIR}/monitoring/rdma-exporter" | ${COMPRESS_CMD} > "\${tmp}"
+    -t "${AIC_RDMA_EXPORTER_IMAGE}" "${AIC_DAY_DIR}/docker/rdma-exporter" | ${COMPRESS_CMD} > "\${tmp}"
 _rc=("\${PIPESTATUS[@]}")
 set -o pipefail
 if [ "\${_rc[1]}" -ne 0 ]; then
