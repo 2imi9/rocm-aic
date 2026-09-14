@@ -1498,7 +1498,7 @@ if [ '${_smoke_exporters}' = "1" ]; then
     MON_DIR='${AIC_DAY_DIR}/monitoring'
     # Compose-only monitoring needs MON_COMPOSE set (the docker-run fallback is
     # gone); without it start_monitoring skips the whole exporter/Prometheus stack.
-    MON_COMPOSE='${AIC_DAY_DIR}/monitoring/docker-compose.monitoring.yml'
+    MON_COMPOSE='${AIC_DAY_DIR}/docker/docker-compose.yml'
     AIC_METRICS_DIR="\${_logdir}/prometheus"
     AIC_EXPORTERS=1
     AIC_MONITORING=1
@@ -2055,7 +2055,7 @@ _clean_kv_shm
 # off: node/GPU/hsa-snoop have nothing to report on a CPU-only emulation node,
 # and hsa-snoop would need a GPU to start at all.
 export MON_DIR='${AIC_DAY_DIR}/monitoring'
-export MON_COMPOSE='${AIC_DAY_DIR}/monitoring/docker-compose.monitoring.yml'
+export MON_COMPOSE='${AIC_DAY_DIR}/docker/docker-compose.yml'
 export AIC_METRICS_DIR="\${_logdir}/prometheus"
 export AIC_MONITORING='${AIC_EMULATE_MP_MONITORING}'
 export AIC_EXPORTERS=0
