@@ -137,7 +137,9 @@ class ReadmeSyncTest(unittest.TestCase):
     def test_write_repairs_all_versions_and_is_idempotent(self) -> None:
         new_values = {
             "ROCM_VERSION": "98.76.54",
+            "PYTORCH_BRANCH": "release/98.76",
             "VLLM_REF": "v98.76.54-fixture",
+            "AITER_REF": "v98.76.58-fixture",
             "LMCACHE_REF": "v98.76.55-fixture",
             "NIXL_REF": "v98.76.56-fixture",
             "HSA_SNOOP_REF": "v98.76.57-fixture",
@@ -154,10 +156,20 @@ class ReadmeSyncTest(unittest.TestCase):
         rendered = self.readme.read_text(encoding="utf-8")
         self.assertIn(f"ROCm-{new_values['ROCM_VERSION']}-green.svg", rendered)
         self.assertIn(
+            f"[![PyTorch](https://img.shields.io/badge/PyTorch-release%2F98.76-ee4c2c.svg)]"
+            "(https://github.com/ROCm/pytorch/tree/release/98.76)",
+            rendered,
+        )
+        self.assertIn(
             f"`{new_values['VLLM_REF']}` + {len(self.patch_names('vllm'))} AMD patches",
             rendered,
         )
-        for name in ("LMCACHE_REF", "NIXL_REF", "HSA_SNOOP_REF"):
+        self.assertIn(
+            f"[![AITER](https://img.shields.io/badge/AITER-v98.76.58--fixture-blue.svg)]"
+            f"(https://github.com/ROCm/aiter/tree/{new_values['AITER_REF']})",
+            rendered,
+        )
+        for name in ("PYTORCH_BRANCH", "AITER_REF", "LMCACHE_REF", "NIXL_REF", "HSA_SNOOP_REF"):
             self.assertIn(f"`{new_values[name]}`", rendered)
         rocm_short = ".".join(new_values["ROCM_VERSION"].split(".")[:2])
         self.assertIn(f"ROCm {rocm_short} base image | GA in ROCm 7.14", rendered)
@@ -212,19 +224,53 @@ class ReadmeSyncTest(unittest.TestCase):
         )
 
     def test_ref_badge_value_is_escaped(self) -> None:
-        _, current = self.docker_arg("VLLM_REF")
-        candidates = (
-            ("release/rocm-test_branch", "release%2Frocm--test__branch"),
-            ("release/rocm-test_branch-fixture", "release%2Frocm--test__branch--fixture"),
+        cases = (
+            (
+                "PYTORCH_BRANCH",
+                "PyTorch",
+                "ee4c2c",
+                "https://github.com/ROCm/pytorch/tree/",
+                "release/rocm-test_branch",
+                "release%2Frocm--test__branch",
+            ),
+            (
+                "VLLM_REF",
+                "vLLM",
+                "blue",
+                "https://github.com/vllm-project/vllm",
+                "release/rocm-test_branch-fixture",
+                "release%2Frocm--test__branch--fixture",
+            ),
+            (
+                "AITER_REF",
+                "AITER",
+                "blue",
+                "https://github.com/ROCm/aiter/tree/",
+                "release/rocm-test_branch-fixture",
+                "release%2Frocm--test__branch--fixture",
+            ),
         )
-        ref, escaped_ref = next(candidate for candidate in candidates if candidate[0] != current)
-        self.set_docker_arg("VLLM_REF", ref)
-        result = self.run_sync("--write")
-        self.assertEqual(result.returncode, 0, result.stderr)
-        rendered = self.readme.read_text(encoding="utf-8")
-        self.assertIn(f"{escaped_ref}-blue.svg", rendered)
-        self.assertIn(f"`{ref}` + {len(self.patch_names('vllm'))} AMD patches", rendered)
-        self.assertEqual(self.run_sync("--check").returncode, 0)
+        for arg_name, badge_name, color, base_url, ref, escaped_ref in cases:
+            with self.subTest(arg_name=arg_name):
+                _, current = self.docker_arg(arg_name)
+                if current == ref:
+                    ref = f"{ref}-alt"
+                    escaped_ref = f"{escaped_ref}--alt"
+                self.set_docker_arg(arg_name, ref)
+                result = self.run_sync("--write")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                rendered = self.readme.read_text(encoding="utf-8")
+                expected_url = f"{base_url}{ref}" if base_url.endswith("/") else base_url
+                self.assertIn(
+                    f"[![{badge_name}](https://img.shields.io/badge/{badge_name}-{escaped_ref}-{color}.svg)]"
+                    f"({expected_url})",
+                    rendered,
+                )
+                if arg_name == "VLLM_REF":
+                    self.assertIn(f"`{ref}` + {len(self.patch_names('vllm'))} AMD patches", rendered)
+                else:
+                    self.assertIn(f"`{ref}`", rendered)
+                self.assertEqual(self.run_sync("--check").returncode, 0)
 
     def test_patch_metadata_is_derived(self) -> None:
         _, vllm_ref = self.docker_arg("VLLM_REF")
