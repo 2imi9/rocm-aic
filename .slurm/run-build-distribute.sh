@@ -794,7 +794,9 @@ PROLOGUE
                 die "job ${jobid} left the queue but sacct still reports state ${state} after 60s; refusing to guess its exit status"
             acct_exit="${code%%:*}"
             if [[ "${state}" == "COMPLETED" ]]; then
-                [[ "${acct_exit}" =~ ^[0-9]+$ ]] || acct_exit=0
+                # SPUR may report "-1" (authz kill) even for COMPLETED state;
+                # treat any non-numeric or negative code as failure, not success.
+                [[ "${acct_exit}" =~ ^[0-9]+$ ]] || acct_exit=1
             else
                 # Non-COMPLETED must never yield 0.  SPUR reports "0:0" for some
                 # cancelled jobs and "-1:0" for others; neither is a success and
@@ -1479,11 +1481,18 @@ kmounts=""
 # In-image checks govern the exit code; capture it so the exporter phase below
 # (informational) can run regardless and we still exit with the real result.
 img_rc=0
+# SYS_ADMIN (nvme-cli ioctl) and seccomp=unconfined are blocked by the SPUR
+# authz plugin.  The smoke test only needs SYS_PTRACE (rocminfo / HIP).
+# On non-SPUR nodes both flags are still passed for full coverage.
+_extra_caps=""
+if [ "${AIC_SPUR_CLUSTER:-0}" != "1" ]; then
+    _extra_caps="--cap-add SYS_ADMIN --security-opt seccomp=unconfined"
+fi
 docker run --rm \
     --device /dev/kfd --device /dev/dri \
     --ipc host \
-    --cap-add SYS_PTRACE --cap-add SYS_ADMIN \
-    --security-opt seccomp=unconfined \
+    --cap-add SYS_PTRACE \
+    \${_extra_caps} \
     \${kmounts} \
     -e ROCR_VISIBLE_DEVICES="\${AIC_ROCR_VISIBLE}" \
     -e HIP_VISIBLE_DEVICES="\${AIC_HIP_VISIBLE}" \
