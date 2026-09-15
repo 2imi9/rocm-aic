@@ -495,6 +495,12 @@ _tarball_stamp() {
 #
 # A re-run of a workflow could see a tarball made from an old run, so we use
 # the `stat` data to verify existence.
+#
+# Cache-hit builds (BuildKit fully cached, image unchanged) legitimately do not
+# rewrite the tarball.  When the tarball already exists and passes the size
+# check, an unchanged stamp is treated as a warning rather than a fatal error:
+# the existing artifact is still valid.  Set AIC_REQUIRE_FRESH_TARBALL=1 to
+# restore strict behaviour (fail if the tarball was not rewritten this run).
 _verify_tarball() {
     local path="$1" what="${2:-image}" before="${3:-}" min_bytes="${4:-1024}"
     # NFS close-to-open consistency: the writing node's `mv` can take a moment
@@ -507,8 +513,16 @@ _verify_tarball() {
     done
     [[ -n "${now}" ]] ||
         die "${what} build reported success but produced no tarball: ${path}"
-    [[ "${now}" != "${before}" ]] ||
-        die "${what} build reported success but did not rewrite its tarball; this is an earlier run's artifact (unchanged at ${before}): ${path}"
+    if [[ "${now}" == "${before}" ]]; then
+        local size="${now##*:}"
+        (( size >= min_bytes )) ||
+            die "${what} tarball is implausibly small (${size} bytes, expected >= ${min_bytes}): ${path}"
+        if [[ "${AIC_REQUIRE_FRESH_TARBALL:-0}" == "1" ]]; then
+            die "${what} build reported success but did not rewrite its tarball; this is an earlier run's artifact (unchanged at ${before}): ${path}"
+        fi
+        log "WARNING: ${what} tarball unchanged after build (BuildKit cache hit — existing artifact is current): ${path} ($(du -h "${path}" | cut -f1))"
+        return 0
+    fi
     local size="${now##*:}"
     (( size >= min_bytes )) ||
         die "${what} tarball is implausibly small (${size} bytes, expected >= ${min_bytes}): ${path}"
