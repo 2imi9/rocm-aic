@@ -120,6 +120,8 @@
 #                         Used only when AIC_BUILD_NODE is unset.
 #   AIC_BUILD_NODE       pin an exact build node via --nodelist (overrides
 #                        AIC_BUILD_CONSTRAINT)             (default: unset)
+#   AIC_BUILD_EXCLUDE_NODES  comma-separated nodes to exclude from build
+#                        scheduling via --exclude (default: unset)
 #   AIC_BUILD_LOCAL      set to 1 to build on THIS host, no Slurm  (default: unset)
 #   AIC_BUILD_PARTITION  Slurm partition for build + load  (default: defq)
 #   AIC_BUILD_CPUS       --cpus-per-task for the build job (default: 32)
@@ -1072,7 +1074,10 @@ REMOTE
             if [[ -n "${AIC_BUILD_CONSTRAINT:-}" ]]; then
                 _sel=(--constraint="${AIC_BUILD_CONSTRAINT}")
             fi
-            log "building via sbatch (partition ${AIC_BUILD_PARTITION}, constraint ${AIC_BUILD_CONSTRAINT})"
+            if [[ -n "${AIC_BUILD_EXCLUDE_NODES:-}" ]]; then
+                _sel+=(--exclude="${AIC_BUILD_EXCLUDE_NODES}")
+            fi
+            log "building via sbatch (partition ${AIC_BUILD_PARTITION}, constraint ${AIC_BUILD_CONSTRAINT}${AIC_BUILD_EXCLUDE_NODES:+, exclude ${AIC_BUILD_EXCLUDE_NODES}})"
         fi
         _sbatch_run aic-build build "${remote_script}" \
             "${_sel[@]}" \
