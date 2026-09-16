@@ -9,7 +9,7 @@
 # schedule rather than chained behind the dist-build -> smoke -> tiny -> cliff
 # sequence, and does not compete with those stages for GPUs.
 #
-# See docs/EMULATE.md.  Needs .github/scripts/spur-emulate-test.sh deployed to
+# See docs/EMULATE.md.  Needs .github/scripts/runners/spur-emulate-test.sh deployed to
 # the runner (`make install-ci-scripts`).
 name: AIC Nightly Emulate Test
 
