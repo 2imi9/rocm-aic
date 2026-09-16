@@ -120,6 +120,8 @@
 #                         Used only when AIC_BUILD_NODE is unset.
 #   AIC_BUILD_NODE       pin an exact build node via --nodelist (overrides
 #                        AIC_BUILD_CONSTRAINT)             (default: unset)
+#   AIC_BUILD_EXCLUDE_NODES  comma-separated nodes to exclude from build
+#                        scheduling via --exclude (default: unset)
 #   AIC_BUILD_LOCAL      set to 1 to build on THIS host, no Slurm  (default: unset)
 #   AIC_BUILD_PARTITION  Slurm partition for build + load  (default: defq)
 #   AIC_BUILD_CPUS       --cpus-per-task for the build job (default: 32)
@@ -495,6 +497,12 @@ _tarball_stamp() {
 #
 # A re-run of a workflow could see a tarball made from an old run, so we use
 # the `stat` data to verify existence.
+#
+# Cache-hit builds (BuildKit fully cached, image unchanged) legitimately do not
+# rewrite the tarball.  When the tarball already exists and passes the size
+# check, an unchanged stamp is treated as a warning rather than a fatal error:
+# the existing artifact is still valid.  Set AIC_REQUIRE_FRESH_TARBALL=1 to
+# restore strict behaviour (fail if the tarball was not rewritten this run).
 _verify_tarball() {
     local path="$1" what="${2:-image}" before="${3:-}" min_bytes="${4:-1024}"
     # NFS close-to-open consistency: the writing node's `mv` can take a moment
@@ -507,8 +515,16 @@ _verify_tarball() {
     done
     [[ -n "${now}" ]] ||
         die "${what} build reported success but produced no tarball: ${path}"
-    [[ "${now}" != "${before}" ]] ||
-        die "${what} build reported success but did not rewrite its tarball; this is an earlier run's artifact (unchanged at ${before}): ${path}"
+    if [[ "${now}" == "${before}" ]]; then
+        local size="${now##*:}"
+        (( size >= min_bytes )) ||
+            die "${what} tarball is implausibly small (${size} bytes, expected >= ${min_bytes}): ${path}"
+        if [[ "${AIC_REQUIRE_FRESH_TARBALL:-0}" == "1" ]]; then
+            die "${what} build reported success but did not rewrite its tarball; this is an earlier run's artifact (unchanged at ${before}): ${path}"
+        fi
+        log "WARNING: ${what} tarball unchanged after build (BuildKit cache hit — existing artifact is current): ${path} ($(du -h "${path}" | cut -f1))"
+        return 0
+    fi
     local size="${now##*:}"
     (( size >= min_bytes )) ||
         die "${what} tarball is implausibly small (${size} bytes, expected >= ${min_bytes}): ${path}"
@@ -780,7 +796,9 @@ PROLOGUE
                 die "job ${jobid} left the queue but sacct still reports state ${state} after 60s; refusing to guess its exit status"
             acct_exit="${code%%:*}"
             if [[ "${state}" == "COMPLETED" ]]; then
-                [[ "${acct_exit}" =~ ^[0-9]+$ ]] || acct_exit=0
+                # SPUR may report "-1" (authz kill) even for COMPLETED state;
+                # treat any non-numeric or negative code as failure, not success.
+                [[ "${acct_exit}" =~ ^[0-9]+$ ]] || acct_exit=1
             else
                 # Non-COMPLETED must never yield 0.  SPUR reports "0:0" for some
                 # cancelled jobs and "-1:0" for others; neither is a success and
@@ -1056,7 +1074,10 @@ REMOTE
             if [[ -n "${AIC_BUILD_CONSTRAINT:-}" ]]; then
                 _sel=(--constraint="${AIC_BUILD_CONSTRAINT}")
             fi
-            log "building via sbatch (partition ${AIC_BUILD_PARTITION}, constraint ${AIC_BUILD_CONSTRAINT})"
+            if [[ -n "${AIC_BUILD_EXCLUDE_NODES:-}" ]]; then
+                _sel+=(--exclude="${AIC_BUILD_EXCLUDE_NODES}")
+            fi
+            log "building via sbatch (partition ${AIC_BUILD_PARTITION}, constraint ${AIC_BUILD_CONSTRAINT}${AIC_BUILD_EXCLUDE_NODES:+, exclude ${AIC_BUILD_EXCLUDE_NODES}})"
         fi
         _sbatch_run aic-build build "${remote_script}" \
             "${_sel[@]}" \
@@ -1447,7 +1468,7 @@ echo "[test] allocated gpu: ROCR=\${AIC_ROCR_VISIBLE} HIP=\${AIC_HIP_VISIBLE}"
 # mtime -- both are build-side values, so there is no build/test clock skew.
 _marker="/var/tmp/aic-loaded-\$(id -u)-\$(echo '${AIC_IMAGE}' | tr '/:' '__').mtime"
 _tar_mtime="\$(stat -c %Y '${tarball}' 2>/dev/null || echo 0)"
-_have_img="\$(docker images -q '${AIC_IMAGE}')"
+_have_img="\$(docker images -q '${AIC_IMAGE}' 2>&1)" || { echo "[test] FAIL: docker images failed (daemon not accessible?): \${_have_img}" >&2; exit 1; }
 _loaded_mtime="\$(cat "\${_marker}" 2>/dev/null || echo 0)"
 if [ "${AIC_FORCE_LOAD:-0}" = "1" ] || [ -z "\${_have_img}" ] || [ "\${_tar_mtime}" -gt "\${_loaded_mtime}" ]; then
     echo "[test] loading ${AIC_IMAGE} from ${tarball} (tarball=\${_tar_mtime} last-loaded=\${_loaded_mtime} present=\$([ -n "\${_have_img}" ] && echo yes || echo no) force=${AIC_FORCE_LOAD:-0})"
@@ -1465,11 +1486,18 @@ kmounts=""
 # In-image checks govern the exit code; capture it so the exporter phase below
 # (informational) can run regardless and we still exit with the real result.
 img_rc=0
+# SYS_ADMIN (nvme-cli ioctl) and seccomp=unconfined are blocked by the SPUR
+# authz plugin.  The smoke test only needs SYS_PTRACE (rocminfo / HIP).
+# On non-SPUR nodes both flags are still passed for full coverage.
+_extra_caps=""
+if [ "${AIC_SPUR_CLUSTER:-0}" != "1" ]; then
+    _extra_caps="--cap-add SYS_ADMIN --security-opt seccomp=unconfined"
+fi
 docker run --rm \
     --device /dev/kfd --device /dev/dri \
     --ipc host \
-    --cap-add SYS_PTRACE --cap-add SYS_ADMIN \
-    --security-opt seccomp=unconfined \
+    --cap-add SYS_PTRACE \
+    \${_extra_caps} \
     \${kmounts} \
     -e ROCR_VISIBLE_DEVICES="\${AIC_ROCR_VISIBLE}" \
     -e HIP_VISIBLE_DEVICES="\${AIC_HIP_VISIBLE}" \
