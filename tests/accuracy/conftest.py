@@ -14,7 +14,7 @@ Skipping is the wrong default under CI: a dead endpoint would report green and
 the gate would pass without having scored anything. Set AIC_ACCURACY_REQUIRED=1
 (the CI driver does) to turn every skip in this file into a failure. The
 knob is deliberately opt-in rather than auto-detected from $CI, so the same
-behaviour is reproducible by hand off a runner.
+behavior is reproducible by hand off a runner.
 
 `AIC_ACCURACY_REQUIRED` only governs endpoint reachability. Skips that encode a
 genuine "this assertion does not apply to this run" — an unknown model with no

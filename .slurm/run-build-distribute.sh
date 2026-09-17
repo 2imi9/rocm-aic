@@ -502,7 +502,7 @@ _tarball_stamp() {
 # rewrite the tarball.  When the tarball already exists and passes the size
 # check, an unchanged stamp is treated as a warning rather than a fatal error:
 # the existing artifact is still valid.  Set AIC_REQUIRE_FRESH_TARBALL=1 to
-# restore strict behaviour (fail if the tarball was not rewritten this run).
+# restore strict behavior (fail if the tarball was not rewritten this run).
 _verify_tarball() {
     local path="$1" what="${2:-image}" before="${3:-}" min_bytes="${4:-1024}"
     # NFS close-to-open consistency: the writing node's `mv` can take a moment
@@ -770,7 +770,7 @@ PROLOGUE
                 die "exit file ${exit_file} for job ${jobid} is not a number: '${acct_exit}'"
             log "exit code from file: ${acct_exit} (${exit_file})"
         else
-            # sacct fallback.  Two SPUR behaviours make the naive read unsafe:
+            # sacct fallback.  Two SPUR behaviors make the naive read unsafe:
             #   * a job that has NOT finished reports ExitCode "0:0" -- verified
             #     across all 159 RUNNING jobs on the cluster -- so the state must
             #     be checked before the code, or a live job reads as success;
@@ -2484,7 +2484,7 @@ cmd_emulate_validate() {
     # only describes the configuration it was captured under, and a warm-vs-cold
     # prefix cache alone changes TTFT by an order of magnitude.
     local extra_args="${AIC_VALIDATE_EXTRA_ARGS---no-enable-prefix-caching}"
-    # Oracle neighbour selection for the replay: 1 = nearest cell, `auto` =
+    # Oracle neighbor selection for the replay: 1 = nearest cell, `auto` =
     # adaptive-K Shepard pooling, which smooths thinly-sampled cells.
     local oracle_k="${AIC_VALIDATE_ORACLE_K:-1}"
 

@@ -70,7 +70,7 @@ The fixtures in `conftest.py` skip when an endpoint is missing, so the package
 can be collected on a machine with no GPU. Under CI that is the wrong default: a
 dead endpoint would report green having scored nothing. The driver sets
 `AIC_ACCURACY_REQUIRED=1`, which turns every unreachability skip into a failure.
-It is opt-in rather than read from `$CI` so the behaviour is reproducible by hand.
+It is opt-in rather than read from `$CI` so the behavior is reproducible by hand.
 
 The switch governs *reachability only*. Skips that encode "this assertion does
 not apply to this run" stay skips — a model absent from `expected.json`, or

@@ -110,7 +110,7 @@
 #   VLLM_EMULATOR_PROFILE_PACK — container path to the profile pack JSON
 #                                (default: the A40/Qwen3-8B example baked into the image)
 #   VLLM_EMULATOR_MODE         — realtime (default, wall-clock sleep) or accelerated (instant)
-#   VLLM_EMULATOR_ORACLE_K     — kNN neighbour count or "auto" (default: 1)
+#   VLLM_EMULATOR_ORACLE_K     — kNN neighbor count or "auto" (default: 1)
 #   EMU_PROFILE_PACK_HOST      — host path to profile pack dir (mounted at /profiles)
 #   HF_HOME                    — host HF cache dir (default: ~/.cache/huggingface)
 #   VLLM_EMULATOR_MEMORY       — emulated KV pool, bytes.  Under `emulate-mp` this
@@ -925,7 +925,7 @@ services:
     # `export KV_TRANSFER_ARG` at file scope (Makefile:90), so reusing that name
     # here silently attached the MP connector to the PLAIN `emulate` profile
     # too, and `make emulate-test` died waiting 300s for an lmcache server that
-    # profile never starts.  Empty by default = the historical behaviour.
+    # profile never starts.  Empty by default = the historical behavior.
     # Two additions the MP profile makes on top of the `make up` JSON:
     #   lmcache.mp.mp_transfer_mode=lmcache_driven — pin the production
     #     topology (the SERVER pulls from registered buffers).  Left on `auto`,
