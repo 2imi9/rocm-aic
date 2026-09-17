@@ -183,6 +183,17 @@ AIC_CI_SCRIPT_DIR := $(CURDIR)/.github/scripts/runners
 
 AIC_FAST_ARCH ?= gfx950
 
+# ---- accuracy-test ---------------------------------------------------------
+# Knobs for the KV-integrity gate; see tests/accuracy/README.md.  Exported so
+# they reach run-build-distribute.sh, which reads them from the environment.
+export AIC_ACCURACY_MODEL AIC_ACCURACY_DELTA
+export AIC_ACCURACY_TIME AIC_ACCURACY_CPUS AIC_ACCURACY_MEM
+export AIC_ACCURACY_READY_TIMEOUT
+# AIC_ACCURACY_LIMIT: optional item cap passed to lm_eval (unset = full split).
+# The floor tolerance is widened by 3x binomial SE when this is set; the
+# differential (DELTA) is unchanged because both arms sample identical items.
+export AIC_ACCURACY_LIMIT
+
 # ---- SPUR cluster overrides ------------------------------------------------
 # When AIC_SPUR_CLUSTER=1, default storage paths to AIC_SHARED_NFS (the NFS
 # volume shared across all SPUR compute nodes) instead of /scratch (not present
@@ -304,6 +315,7 @@ EXPORT_TARBALL ?= $(CURDIR)/$(EXPORT_PREFIX)-$(_GEN_DATE)-$(_GIT_SHORT_REV)$(_GI
         dist-build dist-build-fast dist-build-emulate dist-build-exporters dist-build-monitoring dist-push \
         smoke-test smoke-test-fast tiny-test tiny-test-fast \
         emulate-test emulate-mp-test emulate-validate test-emulate-local stress-emulate-local capture-profile-local profile-capture \
+        accuracy-test accuracy-test-fast accuracy-test-very-fast \
         install-ci-scripts kvbench-build kvbench-up kvbench-logs kvbench-down cliff-kvbench-local cliff-kvbench-submit cliff-submit cliff-short \
         cliff-kvd cliff-spur-l2 cliff-spur-l2-debug cliff-long-64k cliff-long-128k \
         export _check_hf_token _prep_dirs _prep_kvbench_dirs _check_gds_slab
@@ -371,6 +383,11 @@ help:
 	@echo "  make emulate-mp-test   Emulation + the full LMCache MP recipe on a CPU-only node"
 	@echo "  make profile-capture   Capture an AMD profile pack from a REAL GPU serve (gfx942/gfx950)"
 	@echo "  make emulate-validate  Replay a captured pack on CPU and diff vs the real-hardware run"
+	@echo "  make accuracy-test     KV-integrity gate: differential lm_eval, two arms"
+	@echo "  make accuracy-test-fast"
+	@echo "                         The same gate, AIC_ROCM_ARCH pinned to AIC_FAST_ARCH"
+	@echo "  make accuracy-test-very-fast"
+	@echo "                         100-item cap per arm (~25 min); floor widened by 3x SE"
 	@echo "  make install-ci-scripts  Deploy .github/scripts/runners/*.sh to $(AIC_CI_LIB_DIR) (sudo if needed)"
 	@echo "  make cliff-kvbench-submit  sbatch a CPU-only KVBench cliff run (compose kvbench + client)"
 	@echo "  make cliff-submit      sbatch the full 3-arm cliff sweep -> logs/<job-id>/"
@@ -1051,6 +1068,33 @@ emulate-mp-test:               # Emulation + the FULL LMCache MP recipe, still n
 	@# so run `make dist-build` first, not `dist-build-emulate`:
 	@#   AIC_ROCM_ARCH=gfx942 make dist-build emulate-mp-test
 	"$(DIST)" emulate-mp-test
+
+accuracy-test: _check_hf_token   # KV-integrity gate: differential lm_eval over two arms
+	@# Scores a VRAM-only arm and a tiered (LMCache+NIXL) arm in one job and
+	@# asserts tiering KV did not change the answers.  See tests/accuracy/README.md.
+	"$(DIST)" accuracy-test
+
+accuracy-test-fast:            # accuracy-test pinned to the single fast arch
+	@# Same gate as accuracy-test -- both arms, full split -- differing only in
+	@# the arch pin, exactly as tiny-test-fast differs from tiny-test.  There is
+	@# no cheaper accuracy variant: dropping the baseline arm skips the
+	@# differential, which is the whole point of the gate.
+	@# Must pin the SAME AIC_ROCM_ARCH as dist-build-fast.
+	@$(MAKE) --no-print-directory accuracy-test \
+	    AIC_ROCM_ARCH='$(AIC_FAST_ARCH)'
+
+accuracy-test-very-fast:       # Two-arm accuracy check with a small item cap (~25 min)
+	@# Same two-arm differential as accuracy-test-fast but capped at 100 gsm8k
+	@# items per arm.  Each arm takes ~4 min rather than ~35 min, cutting total
+	@# runtime to ~25 min including image load and container startup.  The floor
+	@# tolerance is widened by 3x binomial SE automatically (see test_accuracy.py
+	@# _floor_slack); the differential (DELTA) is unchanged.
+	@# Useful for a quick sanity check after a code change; not a substitute for
+	@# the nightly full-split run.
+	@$(MAKE) --no-print-directory accuracy-test \
+	    AIC_ROCM_ARCH='$(AIC_FAST_ARCH)' \
+	    AIC_ACCURACY_LIMIT=100 \
+	    AIC_ACCURACY_TIME=01:00:00
 
 install-ci-scripts:            # Deploy .github/scripts/runners/*.sh to the runner's AIC_CI_LIB_DIR
 	@set -e; \
