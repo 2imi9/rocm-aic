@@ -321,11 +321,11 @@ jobs:
               try:
                   pack = load_profile_pack(pack_path)
                   oracle = create_oracle_from_profile_pack(pack)
-                  # Ask for a latency at a representative (tokens=512, concurrency=1, kv_depth=0) point
-                  latency = oracle.get_step_latency(num_tokens=512, concurrency=1, kv_depth=0.0)
-                  assert isinstance(latency, float) and latency > 0, \
-                      f"oracle returned non-positive latency: {latency}"
-                  print(f"  OK: oracle returns {latency*1000:.1f} ms at (512 tok, c=1, kv=0)")
+                  # estimate_step_latency_us returns microseconds; use a representative batch shape.
+                  latency_us = oracle.estimate_step_latency_us(total_tokens=512, num_requests=1)
+                  assert isinstance(latency_us, float) and latency_us >= 0, \
+                      f"oracle returned negative latency: {latency_us}"
+                  print(f"  OK: oracle returns {latency_us/1000:.1f} ms at (512 tok, 1 req)")
               except Exception as exc:
                   failures.append(f"{pack_path.name}: {exc}")
                   print(f"  FAIL: {exc}", file=sys.stderr)
