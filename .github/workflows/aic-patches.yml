@@ -290,9 +290,9 @@ jobs:
           set -euo pipefail
           git clone "${{ steps.meta.outputs.url }}" /tmp/llm-emu
           git -C /tmp/llm-emu checkout "${{ steps.meta.outputs.ref }}"
-          for patch in patches/llm-emu/*.patch; do
+          for patch in "${GITHUB_WORKSPACE}"/patches/llm-emu/*.patch; do
             git -C /tmp/llm-emu apply "$patch"
-            echo "Applied: $(basename $patch)"
+            echo "Applied: $(basename "$patch")"
           done
 
       - name: Install plugin (no deps — no torch needed for oracle)
