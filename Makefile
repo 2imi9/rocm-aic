@@ -311,7 +311,7 @@ EXPORT_TARBALL ?= $(CURDIR)/$(EXPORT_PREFIX)-$(_GEN_DATE)-$(_GIT_SHORT_REV)$(_GI
 
 .PHONY: help ensure-compose build up up-batch up-dev up-monitoring down-monitoring up-gds-l1 up-gds-l1-batch down logs logs-lmcache logs-vllm \
         ps shell-lmcache shell-vllm restart-vllm restart-lmcache cliff plot venv vllm-reset-test stress-grafana \
-        monitoring-up monitoring-down monitoring-logs monitoring-build-exporters \
+        monitoring-up monitoring-down monitoring-logs monitoring-build-exporters prometheus-dump \
         dist-build dist-build-fast dist-build-emulate dist-build-exporters dist-build-monitoring dist-push \
         smoke-test smoke-test-fast tiny-test tiny-test-fast \
         emulate-test emulate-mp-test emulate-validate test-emulate-local stress-emulate-local capture-profile-local profile-capture \
@@ -415,6 +415,9 @@ help:
 	@echo "  make monitoring-down   Stop the metrics sidecar (TSDB retained)"
 	@echo "  make monitoring-logs   Follow Prometheus logs"
 	@echo "  make monitoring-build-exporters  Build nvme_exporter + rdma_exporter images"
+	@echo "  make prometheus-dump   Submit SPUR job: full GPU stack → scrape all /metrics →"
+	@echo "                         Markdown reference doc on shared NFS (requires built image)"
+	@echo "    PROM_DUMP_OUT=$(if $(PROM_DUMP_OUT),$(PROM_DUMP_OUT),<AIC_IMAGE_DIR>/../prometheus-dump.md)"
 	@echo "    AIC_METRICS_DIR=$(AIC_METRICS_DIR)"
 	@echo "    AIC_EXPORTERS=$(AIC_EXPORTERS)  (1 = also launch node + AMD GPU exporters)"
 	@echo "    AIC_GRAFANA_PORT=$(AIC_GRAFANA_PORT)   Grafana host port (default: 3000)"
@@ -761,6 +764,26 @@ monitoring-build-exporters:
 	@echo "Built $(NVME_EXPORTER_IMAGE) and $(RDMA_EXPORTER_IMAGE)."
 	@echo "Run them via:  AIC_EXPORTERS=1 with --profile exporters-fabric, or set"
 	@echo "AIC_NVME_EXPORTER_IMAGE / AIC_RDMA_EXPORTER_IMAGE for the .slurm docker-run path."
+
+# Scrape all live /metrics endpoints from a real GPU stack and generate a
+# Markdown reference doc.  Submits a SPUR job that loads the built image,
+# brings up the full compose MP stack (vLLM + LMCache + coordinator), waits
+# for everything to be healthy, scrapes every known /metrics port, then runs
+# monitoring/scripts/metrics_to_md.py to produce the document on shared NFS.
+#
+# Requires a built image tarball (run `make dist-build` first).
+# Optional overrides:
+#   PROM_DUMP_OUT   — output path (default: <AIC_IMAGE_DIR>/../prometheus-dump.md)
+#   PROM_DUMP_WAIT  — seconds to wait after stack is healthy before scraping (default: 15)
+#
+# Example:
+#   make prometheus-dump AIC_SPUR_CLUSTER=1 AIC_SHARED_NFS=/shared_nfs/stebates
+#   make prometheus-dump PROM_DUMP_OUT=/shared_nfs/stebates/prometheus-dump.md
+PROM_DUMP_OUT  ?=
+PROM_DUMP_WAIT ?= 15
+
+prometheus-dump:               # Scrape all /metrics from GPU stack on SPUR → Markdown doc
+	"$(DIST)" prometheus-dump
 
 
 # ---- Distribute / cliff (Slurm) --------------------------------------------

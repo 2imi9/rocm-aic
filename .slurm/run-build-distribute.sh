@@ -1744,6 +1744,227 @@ REMOTE
     log "tiny-test complete"
 }
 
+# --- prometheus-dump: scrape all /metrics endpoints from a live GPU stack ------
+# Loads the image on a GPU node, brings up the full compose MP stack (same config
+# as tiny-test), waits for everything to be healthy, then curls every known
+# /metrics port and feeds the raw text through monitoring/scripts/metrics_to_md.py
+# to produce a Markdown reference document on shared NFS.
+#
+# Output: ${PROM_DUMP_OUT} (default: ${AIC_IMAGE_DIR}/../prometheus-dump.md)
+cmd_prometheus_dump() {
+    _pick_compress
+    local tarball; tarball="$(_tarball_path)"
+    command -v sbatch >/dev/null 2>&1 || die "sbatch not found; cannot run prometheus-dump job"
+    [[ -r "${tarball}" ]] || die "tarball not found: ${tarball} (run 'build' first)"
+
+    local prom_dump_out="${PROM_DUMP_OUT:-${AIC_IMAGE_DIR%/*}/prometheus-dump.md}"
+    local prom_dump_wait="${PROM_DUMP_WAIT:-15}"
+    local prom_scratch="${AIC_IMAGE_DIR%/*}/prom-dump-scratch"
+
+    local -a _sel
+    if [[ -n "${AIC_TEST_NODE:-}" ]]; then
+        _sel=(--nodelist="${AIC_TEST_NODE}")
+        log "prometheus-dump on ${AIC_TEST_NODE} via sbatch (partition ${AIC_BUILD_PARTITION})"
+    else
+        _sel=(--constraint="${AIC_TEST_CONSTRAINT}")
+        log "prometheus-dump via sbatch (partition ${AIC_BUILD_PARTITION}, constraint ${AIC_TEST_CONSTRAINT})"
+    fi
+    log "image: ${AIC_IMAGE}  model: ${AIC_TINY_MODEL}  out: ${prom_dump_out}"
+
+    local remote_script
+    remote_script="$(cat <<REMOTE
+set -uo pipefail
+command -v docker >/dev/null 2>&1 || { echo "\$(hostname): docker not found" >&2; exit 1; }
+echo "[prom-dump] host=\$(hostname) docker=\$(docker --version)"
+export AIC_SPUR_CLUSTER='${AIC_SPUR_CLUSTER}'
+# shellcheck source=/dev/null
+source '${AIC_DAY_DIR}/monitoring/monitoring-lib.sh'
+aic_resolve_gpu_visibility \
+    || { echo "[prom-dump] could not resolve GPU allocation" >&2; exit 1; }
+export GPU="\${AIC_ROCR_VISIBLE%%,*}"
+VLLM_CONTAINER="aic-vllm-gpu\${GPU}"
+echo "[prom-dump] allocated gpu: ROCR=\${AIC_ROCR_VISIBLE} HIP=\${AIC_HIP_VISIBLE}"
+
+_marker="/var/tmp/aic-loaded-\$(id -u)-\$(echo '${AIC_IMAGE}' | tr '/:' '__').mtime"
+_tar_mtime="\$(stat -c %Y '${tarball}' 2>/dev/null || echo 0)"
+_have_img="\$(docker images -q '${AIC_IMAGE}')"
+_loaded_mtime="\$(cat "\${_marker}" 2>/dev/null || echo 0)"
+if [ "${AIC_FORCE_LOAD:-0}" = "1" ] || [ -z "\${_have_img}" ] || [ "\${_tar_mtime}" -gt "\${_loaded_mtime}" ]; then
+    echo "[prom-dump] loading ${AIC_IMAGE} from ${tarball}"
+    ${DECOMPRESS_CMD} '${tarball}' | docker load >/dev/null
+    echo "\${_tar_mtime}" > "\${_marker}" 2>/dev/null || true
+else
+    echo "[prom-dump] image up to date on \$(hostname) (id \${_have_img})"
+fi
+
+cd '${AIC_DAY_DIR}'
+source '${AIC_DAY_DIR}/monitoring/monitoring-lib.sh'
+ensure_compose || { echo "[prom-dump] docker compose unavailable" >&2; exit 1; }
+
+export IMAGE_REF='${AIC_IMAGE}'
+export IMAGE_NAME='${AIC_IMAGE%:*}'
+export ROCM_ARCH='${AIC_ROCM_ARCH}'
+export VLLM_MODEL='${AIC_TINY_MODEL}'
+export HF_HOME='${HF_HOME}'
+export HF_TOKEN='${HF_TOKEN:-}'
+export HF_HUB_OFFLINE=0 TRANSFORMERS_OFFLINE=0
+export LOG="\${_logdir}"
+export NVME_DATA=/tmp/aic-prom-dump-nvme NFS_DATA=/tmp/aic-prom-dump-nfs
+export VLM_GPU_MEMORY_UTILIZATION=0.30
+export VLM_MAX_MODEL_LEN=4096
+export VLM_MAX_NUM_BATCHED_TOKENS=4096
+export VLM_ATTENTION_BACKEND=TRITON_ATTN
+export VLM_KV_CACHE_DTYPE=auto
+export VLM_LOAD_FORMAT=auto
+export LMCACHE_L1_SIZE_GB=4
+# nixl_posix initialises the NIXL agent (and its :19090 telemetry exporter)
+# without requiring hipFile P2PDMA or bare NVMe — POSIX staging buffer only.
+export AIC_L2_BACKEND=nixl_posix
+export LMCACHE_NIXL_POSIX_POOL=128
+export LMCACHE_NIXL_POSIX_SLOT_SIZE=33554432
+export LMCACHE_MAX_GPU_WORKERS=1
+export VLLM_IPC_MODE=service:lmcache
+export VLLM_PID_MODE=service:lmcache
+export KV_TRANSFER_ARG="--kv-transfer-config '{\"kv_connector\":\"LMCacheMPConnector\",\"kv_role\":\"kv_both\",\"kv_connector_extra_config\":{\"lmcache.mp.host\":\"tcp://aic-lmcache\",\"lmcache.mp.port\":6555}}'"
+# hsa-snoop: use container PID namespace (SPUR authz blocks --pid=host).
+export AIC_HSA_SNOOP_PID_MODE=container:aic-lmcache
+# Monitoring metrics dir for Prometheus TSDB.
+export AIC_METRICS_DIR="\${_logdir}/prometheus"
+export PROM_UID="\$(id -u)" PROM_GID="\$(id -g)"
+mkdir -p "\${HF_HOME}" "\${AIC_METRICS_DIR}" /tmp/aic-prom-dump-nvme /tmp/aic-prom-dump-nfs
+
+compose() { docker compose -f '${AIC_DAY_DIR}/docker/docker-compose.yml' "\$@"; }
+cleanup() {
+    pkill -9 -f 'vllm.entrypoints.openai' 2>/dev/null || true
+    pkill -9 -f 'EngineCore'              2>/dev/null || true
+    pkill -9 -f 'lmcache server'          2>/dev/null || true
+    sleep 2
+    timeout 60 compose \
+        --profile cache --profile monitoring-base --profile exporters-safe \
+        down --remove-orphans --timeout 5 >/dev/null 2>&1 || true
+    rm -rf /tmp/aic-prom-dump-nvme /tmp/aic-prom-dump-nfs 2>/dev/null || true
+}
+trap cleanup EXIT
+
+echo "[prom-dump] bringing up full MP + monitoring stack (model=${AIC_TINY_MODEL}) ..."
+# Profiles used:
+#   cache            — vllm, lmcache, lmcache-coordinator, client
+#   monitoring-base  — prometheus, grafana (all public images)
+# Exporters started individually to avoid locally-built images that aren't
+# pre-loaded on this node:
+#   amdgpu-exporter  — public image, no --pid=host (SPUR-safe)
+#   hsa-snoop        — uses the already-loaded rocm-aic image
+# node-exporter, nvme-exporter require --pid=host (blocked by spur-authz).
+# rdma-exporter uses a locally-built image not guaranteed to be present.
+if ! compose --profile cache --profile monitoring-base up -d; then
+    echo "[prom-dump] FAIL: compose up failed" >&2; exit 1
+fi
+# Start amdgpu-exporter and hsa-snoop individually (skip if they fail).
+compose up -d amdgpu-exporter 2>/dev/null || echo "[prom-dump] amdgpu-exporter unavailable (skipping)"
+compose up -d hsa-snoop       2>/dev/null || echo "[prom-dump] hsa-snoop unavailable (skipping)"
+
+# Wait for vLLM to be ready (probe from the client container on the Compose network).
+echo "[prom-dump] waiting for vLLM on :8000 (up to ${AIC_TINY_READY_TIMEOUT}s) ..."
+_ok=0
+for _i in \$(seq 1 \$(( ${AIC_TINY_READY_TIMEOUT:-300} / 5 ))); do
+    r=\$(docker exec aic-client curl -s -o /dev/null -w '%{http_code}' \
+        http://"\${VLLM_CONTAINER}":8000/health 2>/dev/null || true)
+    [ "\$r" = "200" ] && { _ok=1; break; }
+    [ -z "\$(docker ps -q -f name="\${VLLM_CONTAINER}")" ] && break
+    sleep 5
+done
+[ "\$_ok" != "1" ] && { echo "[prom-dump] FAIL: vLLM not healthy" >&2; exit 1; }
+echo "[prom-dump] stack healthy — waiting ${prom_dump_wait}s for NIXL init + Prometheus scrape..."
+sleep '${prom_dump_wait}'
+
+# Extract component versions from the image LABEL metadata.
+echo "[prom-dump] extracting component versions from image labels..."
+_version_args=""
+_label() {
+    docker inspect --format "{{index .Config.Labels \"ai.amd.aic.\$1\"}}" '${AIC_IMAGE}' 2>/dev/null
+}
+for _comp in version rocm pytorch vllm llm-emu aiter flash-attention lmcache nixl hipfile hsa-snoop; do
+    _val="\$(_label "\${_comp}")"
+    [ -n "\${_val}" ] && _version_args="\${_version_args} --version \${_comp}:\${_val}"
+done
+
+# Scrape every /metrics endpoint that may be present; skip those that are not.
+# Services on the compose bridge network (vllm, lmcache, etc.) are reached via
+# docker exec aic-client curl using compose DNS names.  Host-side exporters
+# (node_exporter, nvme_exporter, rdma_exporter, amdgpu_exporter) listen on the
+# host network and are reached directly via localhost.
+echo "[prom-dump] scraping /metrics endpoints..."
+mkdir -p '${prom_scratch}'
+_args=""
+# Scrape via the client container on the compose network (DNS: service name).
+_scrape_compose() {
+    local name="\$1" host="\$2" port="\$3"
+    local out='${prom_scratch}'/metrics_"\${name}".txt
+    if docker exec aic-client curl -sf "http://\${host}:\${port}/metrics" > "\${out}" 2>/dev/null && [ -s "\${out}" ]; then
+        echo "  \${name} \${host}:\${port} — \$(grep -c '^# HELP' "\${out}") metrics"
+        _args="\${_args} --source \${name}:\${out}"
+    else
+        echo "  \${name} \${host}:\${port} — not reachable (skipped)"
+    fi
+}
+# Scrape directly from the host (host-network services).
+_scrape_host() {
+    local name="\$1" port="\$2"
+    local out='${prom_scratch}'/metrics_"\${name}".txt
+    if curl -sf "http://localhost:\${port}/metrics" > "\${out}" 2>/dev/null && [ -s "\${out}" ]; then
+        echo "  \${name} localhost:\${port} — \$(grep -c '^# HELP' "\${out}") metrics"
+        _args="\${_args} --source \${name}:\${out}"
+    else
+        echo "  \${name} localhost:\${port} — not reachable (skipped)"
+    fi
+}
+_scrape_compose vllm                "\${VLLM_CONTAINER}"         8000
+_scrape_compose lmcache             aic-lmcache                  8080
+_scrape_compose nixl                aic-lmcache                  19090
+_scrape_compose lmcache_coordinator aic-lmcache-coordinator      9301
+_scrape_compose hsa_snoop           aic-hsa-snoop                9488
+_scrape_host    node_exporter                                     9100
+_scrape_host    nvme_exporter                                     9998
+_scrape_host    rdma_exporter                                     9879
+_scrape_host    amdgpu_exporter                                   5000
+_scrape_host    prometheus                                        9090
+
+# Collect running container names, images, and status for the report.
+# Write to a TSV file; metrics_to_md.py reads it via --containers-tsv.
+echo "[prom-dump] collecting container inventory..."
+_containers_file='${prom_scratch}'/containers.tsv
+docker ps --format '{{.Names}}\t{{.Image}}\t{{.Status}}' 2>/dev/null > "\${_containers_file}" || true
+_container_args="--containers-tsv \${_containers_file}"
+
+echo "[prom-dump] generating markdown: ${prom_dump_out}"
+mkdir -p "\$(dirname '${prom_dump_out}')"
+python3 '${AIC_DAY_DIR}/monitoring/scripts/metrics_to_md.py' \
+    \${_args} \
+    \${_version_args} \
+    \${_container_args} \
+    --sha "\$(git -C '${AIC_DAY_DIR}' rev-parse --short HEAD 2>/dev/null || echo unknown)" \
+    --title "AIC Prometheus Metrics Reference" \
+    --output '${prom_dump_out}'
+rm -rf '${prom_scratch}'
+echo "[prom-dump] written: ${prom_dump_out}"
+REMOTE
+)"
+
+    local -a _gpu_request
+    if [[ "${AIC_SPUR_CLUSTER}" == "1" ]]; then
+        _gpu_request=(--gpus="${AIC_TEST_GPUS}")
+    else
+        _gpu_request=(--gres="${AIC_TEST_GRES}")
+    fi
+    _sbatch_run aic-prom-dump prometheus-dump "${remote_script}" \
+        "${_sel[@]}" \
+        "${_gpu_request[@]}" \
+        --nodes=1 --ntasks=1 \
+        --cpus-per-task="${AIC_TINY_CPUS}" --mem="${AIC_TINY_MEM}" \
+        --time="${AIC_TINY_TIME}"
+    log "prometheus-dump complete: ${prom_dump_out}"
+}
+
 # --- emulate-test: end-to-end serve check of the emulation image on a CPU node -
 # Loads the `emulate` tarball on a CPU-only node, brings up the compose `emulate`
 # profile (vLLM serving with the llm-emu executor hook), and asserts:
@@ -2982,6 +3203,7 @@ main() {
         push)            cmd_push ;;
         test)            cmd_test ;;
         tiny-test)       cmd_tiny_test ;;
+        prometheus-dump) cmd_prometheus_dump ;;
         emulate-test)    cmd_emulate_test ;;
         emulate-mp-test) cmd_emulate_mp_test ;;
         emulate-validate) cmd_emulate_validate ;;
@@ -2991,7 +3213,7 @@ main() {
         -h|--help|help)
             sed -n '2,70p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
             ;;
-        *) die "unknown command '${sub}' (use: build | build-emulate | build-exporters | load | push | test | tiny-test | emulate-test | emulate-mp-test | emulate-validate | profile-capture | accuracy-test | all | help)" ;;
+        *) die "unknown command '${sub}' (use: build | build-emulate | build-exporters | load | push | test | tiny-test | prometheus-dump | emulate-test | emulate-mp-test | emulate-validate | profile-capture | accuracy-test | all | help)" ;;
     esac
 }
 
