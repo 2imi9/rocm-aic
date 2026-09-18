@@ -144,7 +144,7 @@ export KV_TRANSFER_ARG
 AIC_METRICS_DIR  ?= $(CURDIR)/logs/prometheus
 AIC_EXPORTERS    ?= 0
 AIC_GRAFANA_PORT ?= 3000
-AIC_GRAFANA_IMAGE ?= grafana/grafana:13.2.1
+AIC_GRAFANA_IMAGE ?= grafana/grafana:13.2.2
 MON_COMPOSE     := $(_COMPOSE_BIN) -f "$(CURDIR)/docker/docker-compose.yml"
 _MON_PROFILE    := --profile monitoring-base $(if $(filter 1,$(AIC_EXPORTERS)),--profile exporters,)
 export AIC_METRICS_DIR AIC_GRAFANA_PORT AIC_GRAFANA_IMAGE
@@ -157,7 +157,7 @@ export AIC_METRICS_DIR AIC_GRAFANA_PORT AIC_GRAFANA_IMAGE
 NVME_EXPORTER_IMAGE   ?= aic-nvme-exporter:local
 RDMA_EXPORTER_IMAGE   ?= aic-rdma-exporter:local
 NVME_EXPORTER_VERSION ?= 3.0.0
-RDMA_EXPORTER_VERSION ?= 0.3.0
+RDMA_EXPORTER_VERSION ?= 0.7.3
 
 PYTHON := $(if $(wildcard $(REPO_ROOT)/.venv/bin/python3),$(REPO_ROOT)/.venv/bin/python3,python3)
 
@@ -311,7 +311,7 @@ EXPORT_TARBALL ?= $(CURDIR)/$(EXPORT_PREFIX)-$(_GEN_DATE)-$(_GIT_SHORT_REV)$(_GI
 
 .PHONY: help ensure-compose build up up-batch up-dev up-monitoring down-monitoring up-gds-l1 up-gds-l1-batch down logs logs-lmcache logs-vllm \
         ps shell-lmcache shell-vllm restart-vllm restart-lmcache cliff plot venv vllm-reset-test stress-grafana \
-        monitoring-up monitoring-down monitoring-logs monitoring-build-exporters \
+        monitoring-up monitoring-down monitoring-logs monitoring-build-exporters prometheus-dump \
         dist-build dist-build-fast dist-build-emulate dist-build-exporters dist-build-monitoring dist-push \
         smoke-test smoke-test-fast tiny-test tiny-test-fast \
         emulate-test emulate-mp-test emulate-validate test-emulate-local stress-emulate-local capture-profile-local profile-capture \
@@ -415,6 +415,9 @@ help:
 	@echo "  make monitoring-down   Stop the metrics sidecar (TSDB retained)"
 	@echo "  make monitoring-logs   Follow Prometheus logs"
 	@echo "  make monitoring-build-exporters  Build nvme_exporter + rdma_exporter images"
+	@echo "  make prometheus-dump   Submit SPUR job: full GPU stack → scrape all /metrics →"
+	@echo "                         Markdown reference doc on shared NFS (requires built image)"
+	@echo "    PROM_DUMP_OUT=$(if $(PROM_DUMP_OUT),$(PROM_DUMP_OUT),<AIC_IMAGE_DIR>/../prometheus-dump.md)"
 	@echo "    AIC_METRICS_DIR=$(AIC_METRICS_DIR)"
 	@echo "    AIC_EXPORTERS=$(AIC_EXPORTERS)  (1 = also launch node + AMD GPU exporters)"
 	@echo "    AIC_GRAFANA_PORT=$(AIC_GRAFANA_PORT)   Grafana host port (default: 3000)"
@@ -525,7 +528,7 @@ build-cached: monitoring-build-exporters  ## Like `build` but uses buildx with a
 		$(if $(TLS_CERT),--secret id=tls_cert$(comma)src=$(TLS_CERT),) \
 		--cache-from type=local,src="$(AIC_LOCAL_CACHE_DIR)" \
 		--cache-to   type=local,dest="$(AIC_LOCAL_CACHE_DIR)",mode=max \
-		-f "$(REPO_ROOT)/docker/Dockerfile" \
+		-f "$(REPO_ROOT)/docker/lmcache/Dockerfile" \
 		-t "$(IMAGE_REF)" \
 		-t "$(IMAGE_NAME):latest" \
 		"$(REPO_ROOT)"
@@ -762,6 +765,26 @@ monitoring-build-exporters:
 	@echo "Run them via:  AIC_EXPORTERS=1 with --profile exporters-fabric, or set"
 	@echo "AIC_NVME_EXPORTER_IMAGE / AIC_RDMA_EXPORTER_IMAGE for the .slurm docker-run path."
 
+# Scrape all live /metrics endpoints from a real GPU stack and generate a
+# Markdown reference doc.  Submits a SPUR job that loads the built image,
+# brings up the full compose MP stack (vLLM + LMCache + coordinator), waits
+# for everything to be healthy, scrapes every known /metrics port, then runs
+# monitoring/scripts/metrics_to_md.py to produce the document on shared NFS.
+#
+# Requires a built image tarball (run `make dist-build` first).
+# Optional overrides:
+#   PROM_DUMP_OUT   — output path (default: <AIC_IMAGE_DIR>/../prometheus-dump.md)
+#   PROM_DUMP_WAIT  — seconds to wait after stack is healthy before scraping (default: 15)
+#
+# Example:
+#   make prometheus-dump AIC_SPUR_CLUSTER=1 AIC_SHARED_NFS=/shared_nfs/stebates
+#   make prometheus-dump PROM_DUMP_OUT=/shared_nfs/stebates/prometheus-dump.md
+PROM_DUMP_OUT  ?=
+PROM_DUMP_WAIT ?= 15
+
+prometheus-dump:               # Scrape all /metrics from GPU stack on SPUR → Markdown doc
+	"$(DIST)" prometheus-dump
+
 
 # ---- Distribute / cliff (Slurm) --------------------------------------------
 # Thin wrappers over .slurm/run-build-distribute.sh (build/push/test on a Slurm
@@ -790,6 +813,26 @@ dist-build-emulate:            # Build the CPU-only emulation image on a Slurm b
 	@# GPU image is untouched.  Pair with `make emulate-test`.
 	"$(DIST)" build-emulate
 
+dist-build-base:               # Build aic-base image (PyTorch + torchvision) — prerequisite for vllm/lmcache
+	@# Builds docker/base/Dockerfile and tags as aic-base:$(IMAGE_TAG).
+	@# Run before dist-build-vllm or dist-build-lmcache.
+	"$(DIST)" build-base
+
+dist-build-vllm:               # Build aic-vllm image (requires aic-base to be built first)
+	@# Builds docker/vllm/Dockerfile with --build-context base=docker-image://aic-base:TAG.
+	@# Can run in parallel with dist-build-lmcache after dist-build-base completes.
+	"$(DIST)" build-vllm
+
+dist-build-lmcache:            # Build aic-lmcache image (requires aic-base to be built first)
+	@# Builds docker/lmcache/Dockerfile with --build-context base=docker-image://aic-base:TAG.
+	@# Can run in parallel with dist-build-vllm after dist-build-base completes.
+	"$(DIST)" build-lmcache
+
+dist-build-parallel:           # Build base, then vllm + lmcache in parallel
+	@# Builds aic-base first, then aic-vllm and aic-lmcache concurrently.
+	@$(MAKE) --no-print-directory dist-build-base
+	@$(MAKE) --no-print-directory -j2 dist-build-vllm dist-build-lmcache
+
 dist-build-exporters:          # Build ONLY the fabric exporters (no main-image rebuild)
 	@# Rebuild just the nvme/rdma exporter images -- e.g. after `make dist-build`
 	@# succeeded for the main image but the exporter step failed for lack of Docker
@@ -804,7 +847,7 @@ dist-build-monitoring:         # Pull + save monitoring sidecar images to AIC_IM
 	@set -e; \
 	for img in \
 	    "prom/prometheus:v3.14.0" \
-	    "rocm/device-metrics-exporter:v1.5.1" \
+	    "rocm/device-metrics-exporter:v1.5.2" \
 	; do \
 	    tag="$$(printf '%s' "$$img" | tr '/:' '--').tar.zst"; \
 	    dest="$(AIC_IMAGE_DIR)/$$tag"; \
@@ -1153,7 +1196,7 @@ endif
 endif
 ifeq ($(AIC_SPUR_CLUSTER),1)
 _CLIFF_SPUR_CTL  := SPUR_CONTROLLER_ADDR=$(AIC_SPUR_CONTROLLER)
-_CLIFF_SBATCH_ARGS := --partition=amd-spur --constraint= --gpus=$(AIC_CLIFF_GPUS) \
+_CLIFF_SBATCH_ARGS := --partition=amd-spur --constraint= --gres= --gpus=$(AIC_CLIFF_GPUS) \
     $(if $(AIC_CLIFF_NODE),--nodelist=$(AIC_CLIFF_NODE),)
 # SPUR sbatch does not support --parsable or --no-requeue; parse job id from "Submitted batch job N"
 _CLIFF_SUBMIT     = $(_CLIFF_SPUR_CTL) $(_CLIFF_STRIP) sbatch \
