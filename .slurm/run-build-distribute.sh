@@ -1859,9 +1859,8 @@ echo "[prom-dump] bringing up full MP + monitoring stack (model=${AIC_TINY_MODEL
 if ! compose --profile cache --profile monitoring-base up -d; then
     echo "[prom-dump] FAIL: compose up failed" >&2; exit 1
 fi
-# Start amdgpu-exporter and hsa-snoop individually (skip if they fail).
+# amdgpu-exporter: public image, safe to start immediately.
 compose up -d amdgpu-exporter 2>/dev/null || echo "[prom-dump] amdgpu-exporter unavailable (skipping)"
-compose up -d hsa-snoop       2>/dev/null || echo "[prom-dump] hsa-snoop unavailable (skipping)"
 
 # Wait for vLLM to be ready (probe from the client container on the Compose network).
 echo "[prom-dump] waiting for vLLM on :8000 (up to ${AIC_TINY_READY_TIMEOUT}s) ..."
@@ -1874,6 +1873,8 @@ for _i in \$(seq 1 \$(( ${AIC_TINY_READY_TIMEOUT:-300} / 5 ))); do
     sleep 5
 done
 [ "\$_ok" != "1" ] && { echo "[prom-dump] FAIL: vLLM not healthy" >&2; exit 1; }
+# hsa-snoop: start after lmcache is healthy (uses container:aic-lmcache PID ns).
+compose up -d hsa-snoop 2>/dev/null || echo "[prom-dump] hsa-snoop unavailable (skipping)"
 echo "[prom-dump] stack healthy — waiting ${prom_dump_wait}s for NIXL init + Prometheus scrape..."
 sleep '${prom_dump_wait}'
 
@@ -1923,11 +1924,11 @@ _scrape_compose lmcache             aic-lmcache                  8080
 _scrape_compose nixl                aic-lmcache                  19090
 _scrape_compose lmcache_coordinator aic-lmcache-coordinator      9301
 _scrape_compose hsa_snoop           aic-hsa-snoop                9488
+_scrape_compose amdgpu_exporter     aic-amdgpu-exporter          5000
+_scrape_compose prometheus          aic-prometheus               9090
 _scrape_host    node_exporter                                     9100
 _scrape_host    nvme_exporter                                     9998
 _scrape_host    rdma_exporter                                     9879
-_scrape_host    amdgpu_exporter                                   5000
-_scrape_host    prometheus                                        9090
 
 # Collect running container names, images, and status for the report.
 # Write to a TSV file; metrics_to_md.py reads it via --containers-tsv.
