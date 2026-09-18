@@ -121,19 +121,6 @@ print('vllm_emulator subpackages import OK')" && \
     cp /app/llm-emu/example_profiling_data/*.json /opt/llm-emu/profiles/ && \
     test -r "${AIC_EMULATOR_EXAMPLE_PACK}"
 
-# =============================================================================
-# ----- 3c. emulate — emulation-only runtime image (--target emulate) ---------
-# =============================================================================
-FROM vllm AS emulate
-ENV PYTHONUNBUFFERED=1 \
-    PYTHONHASHSEED=0 \
-    SAFETENSORS_FAST_GPU=1 \
-    PYTHONPATH=/opt/rocm/share/amd_smi
-COPY profiles/*.json /opt/llm-emu/profiles/
-RUN test -r "${AIC_EMULATOR_DEFAULT_PACK}" || \
-    { echo "ERROR: default profile pack missing: ${AIC_EMULATOR_DEFAULT_PACK}" >&2; exit 1; }
-ENTRYPOINT ["python3", "-m", "vllm.entrypoints.openai.api_server"]
-
 # ----- Runtime ENV + metadata -------------------------------------------------
 ENV PYTHONUNBUFFERED=1 \
     PYTHONHASHSEED=0 \
@@ -158,6 +145,19 @@ LABEL org.opencontainers.image.title="aic-vllm" \
       ai.amd.aic.vllm="${VLLM_REF}" \
       ai.amd.aic.llm-emu="${LLM_EMU_REF}"
 
+ENTRYPOINT ["python3", "-m", "vllm.entrypoints.openai.api_server"]
+
+# =============================================================================
+# ----- 3c. emulate — emulation-only runtime image (--target emulate) ---------
+# =============================================================================
+FROM vllm AS emulate
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONHASHSEED=0 \
+    SAFETENSORS_FAST_GPU=1 \
+    PYTHONPATH=/opt/rocm/share/amd_smi
+COPY profiles/*.json /opt/llm-emu/profiles/
+RUN test -r "${AIC_EMULATOR_DEFAULT_PACK}" || \
+    { echo "ERROR: default profile pack missing: ${AIC_EMULATOR_DEFAULT_PACK}" >&2; exit 1; }
 ENTRYPOINT ["python3", "-m", "vllm.entrypoints.openai.api_server"]
 
 # ----- runtime: default target -----------------------------------------------
