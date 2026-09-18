@@ -147,6 +147,9 @@ RUN cd /app/LMCache && \
     done
 
 RUN --mount=type=cache,target=/root/.cache/pip \
+    pip3 install --no-cache-dir grpcio-tools
+
+RUN --mount=type=cache,target=/root/.cache/pip \
     mkdir -p /wheels && \
     printf '%s\n' "${ROCM_ARCH%%;*}" > /etc/rocm_target.lst && \
     cd /app/LMCache && \
