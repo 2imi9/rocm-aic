@@ -142,13 +142,15 @@ RUN --mount=type=cache,target=/root/.cache/ccache \
 
 # =============================================================================
 # torchvision source build — must compile against our source-built PyTorch.
-# Pin TORCHVISION_BRANCH to the release matching PyTorch 2.13 (v0.29.x series).
+# Pin TORCHVISION_BRANCH to the release matching PyTorch 2.13 (v0.28.x series).
+# NOTE: v0.29.0 requires torch::stable::permute which is not present in
+# ROCm/pytorch@release/2.13; stay on v0.28.0 until the ROCm fork advances.
 # =============================================================================
 FROM build_pytorch AS build_torchvision
 
 ARG ROCM_ARCH
 ARG TORCHVISION_REPO=https://github.com/pytorch/vision.git
-ARG TORCHVISION_BRANCH=v0.29.0
+ARG TORCHVISION_BRANCH=v0.28.0
 
 RUN git clone --depth 1 --branch "${TORCHVISION_BRANCH}" "${TORCHVISION_REPO}" /app/vision
 
