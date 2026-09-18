@@ -144,7 +144,7 @@ export KV_TRANSFER_ARG
 AIC_METRICS_DIR  ?= $(CURDIR)/logs/prometheus
 AIC_EXPORTERS    ?= 0
 AIC_GRAFANA_PORT ?= 3000
-AIC_GRAFANA_IMAGE ?= grafana/grafana:13.2.1
+AIC_GRAFANA_IMAGE ?= grafana/grafana:13.2.2
 MON_COMPOSE     := $(_COMPOSE_BIN) -f "$(CURDIR)/docker/docker-compose.yml"
 _MON_PROFILE    := --profile monitoring-base $(if $(filter 1,$(AIC_EXPORTERS)),--profile exporters,)
 export AIC_METRICS_DIR AIC_GRAFANA_PORT AIC_GRAFANA_IMAGE
@@ -157,7 +157,7 @@ export AIC_METRICS_DIR AIC_GRAFANA_PORT AIC_GRAFANA_IMAGE
 NVME_EXPORTER_IMAGE   ?= aic-nvme-exporter:local
 RDMA_EXPORTER_IMAGE   ?= aic-rdma-exporter:local
 NVME_EXPORTER_VERSION ?= 3.0.0
-RDMA_EXPORTER_VERSION ?= 0.3.0
+RDMA_EXPORTER_VERSION ?= 0.7.3
 
 PYTHON := $(if $(wildcard $(REPO_ROOT)/.venv/bin/python3),$(REPO_ROOT)/.venv/bin/python3,python3)
 
@@ -525,7 +525,7 @@ build-cached: monitoring-build-exporters  ## Like `build` but uses buildx with a
 		$(if $(TLS_CERT),--secret id=tls_cert$(comma)src=$(TLS_CERT),) \
 		--cache-from type=local,src="$(AIC_LOCAL_CACHE_DIR)" \
 		--cache-to   type=local,dest="$(AIC_LOCAL_CACHE_DIR)",mode=max \
-		-f "$(REPO_ROOT)/docker/Dockerfile" \
+		-f "$(REPO_ROOT)/docker/lmcache/Dockerfile" \
 		-t "$(IMAGE_REF)" \
 		-t "$(IMAGE_NAME):latest" \
 		"$(REPO_ROOT)"
@@ -790,6 +790,26 @@ dist-build-emulate:            # Build the CPU-only emulation image on a Slurm b
 	@# GPU image is untouched.  Pair with `make emulate-test`.
 	"$(DIST)" build-emulate
 
+dist-build-base:               # Build aic-base image (PyTorch + torchvision) — prerequisite for vllm/lmcache
+	@# Builds docker/base/Dockerfile and tags as aic-base:$(IMAGE_TAG).
+	@# Run before dist-build-vllm or dist-build-lmcache.
+	"$(DIST)" build-base
+
+dist-build-vllm:               # Build aic-vllm image (requires aic-base to be built first)
+	@# Builds docker/vllm/Dockerfile with --build-context base=docker-image://aic-base:TAG.
+	@# Can run in parallel with dist-build-lmcache after dist-build-base completes.
+	"$(DIST)" build-vllm
+
+dist-build-lmcache:            # Build aic-lmcache image (requires aic-base to be built first)
+	@# Builds docker/lmcache/Dockerfile with --build-context base=docker-image://aic-base:TAG.
+	@# Can run in parallel with dist-build-vllm after dist-build-base completes.
+	"$(DIST)" build-lmcache
+
+dist-build-parallel:           # Build base, then vllm + lmcache in parallel
+	@# Builds aic-base first, then aic-vllm and aic-lmcache concurrently.
+	@$(MAKE) --no-print-directory dist-build-base
+	@$(MAKE) --no-print-directory -j2 dist-build-vllm dist-build-lmcache
+
 dist-build-exporters:          # Build ONLY the fabric exporters (no main-image rebuild)
 	@# Rebuild just the nvme/rdma exporter images -- e.g. after `make dist-build`
 	@# succeeded for the main image but the exporter step failed for lack of Docker
@@ -804,7 +824,7 @@ dist-build-monitoring:         # Pull + save monitoring sidecar images to AIC_IM
 	@set -e; \
 	for img in \
 	    "prom/prometheus:v3.14.0" \
-	    "rocm/device-metrics-exporter:v1.5.1" \
+	    "rocm/device-metrics-exporter:v1.5.2" \
 	; do \
 	    tag="$$(printf '%s' "$$img" | tr '/:' '--').tar.zst"; \
 	    dest="$(AIC_IMAGE_DIR)/$$tag"; \

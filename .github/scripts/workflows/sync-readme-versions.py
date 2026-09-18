@@ -17,18 +17,28 @@ from urllib.parse import quote
 
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-DOCKERFILE = REPO_ROOT / "docker" / "Dockerfile"
+# After the Dockerfile split, each service has its own Dockerfile.
+# ROCM_VERSION and PYTORCH_BRANCH live in base/; VLLM_REF in vllm/;
+# AITER_REF, LMCACHE_REF, NIXL_REF, HSA_SNOOP_REF in lmcache/.
+# For README sync we probe each Dockerfile for its own ARGs.
+BASE_DOCKERFILE = REPO_ROOT / "docker" / "base" / "Dockerfile"
+VLLM_DOCKERFILE = REPO_ROOT / "docker" / "vllm" / "Dockerfile"
+LMCACHE_DOCKERFILE = REPO_ROOT / "docker" / "lmcache" / "Dockerfile"
+# Canonical Dockerfile used for REQUIRED_ARGS validation (the one that holds most ARGs).
+DOCKERFILE = LMCACHE_DOCKERFILE
 README = REPO_ROOT / "README.md"
-REQUIRED_ARGS = (
-    "ROCM_VERSION",
-    "ROCM_BASE_IMAGE",
-    "PYTORCH_BRANCH",
-    "VLLM_REF",
-    "AITER_REF",
-    "LMCACHE_REF",
-    "NIXL_REF",
-    "HSA_SNOOP_REF",
-)
+# Maps each required ARG name to the Dockerfile that owns it.
+_ARG_DOCKERFILE: dict[str, "Path"] = {
+    "ROCM_VERSION": BASE_DOCKERFILE,
+    "ROCM_BASE_IMAGE": BASE_DOCKERFILE,
+    "PYTORCH_BRANCH": BASE_DOCKERFILE,
+    "VLLM_REF": VLLM_DOCKERFILE,
+    "AITER_REF": LMCACHE_DOCKERFILE,
+    "LMCACHE_REF": LMCACHE_DOCKERFILE,
+    "NIXL_REF": LMCACHE_DOCKERFILE,
+    "HSA_SNOOP_REF": LMCACHE_DOCKERFILE,
+}
+REQUIRED_ARGS = tuple(_ARG_DOCKERFILE.keys())
 
 
 class SyncError(Exception):
@@ -54,23 +64,29 @@ def report_error(path: Path, message: str) -> None:
 
 
 def docker_arg_defaults(text: str) -> dict[str, str]:
+    # text is unused — each ARG is now read from its owning Dockerfile directly.
     values: dict[str, str] = {}
+    _texts: dict["Path", str] = {}
     for name in REQUIRED_ARGS:
+        df = _ARG_DOCKERFILE[name]
+        if df not in _texts:
+            _texts[df] = df.read_text(encoding="utf-8")
+        df_text = _texts[df]
         pattern = re.compile(
             rf"^[ \t]*(?i:ARG)[ \t]+{re.escape(name)}=(.*)$",
             re.MULTILINE,
         )
-        defaults = [match.group(1).strip() for match in pattern.finditer(text)]
+        defaults = [match.group(1).strip() for match in pattern.finditer(df_text)]
         if len(defaults) != 1 or not defaults[0]:
             nonempty = sum(bool(value) for value in defaults)
             raise SyncError(
-                DOCKERFILE,
+                df,
                 f"expected exactly one non-empty ARG {name}= default; "
                 f"found {len(defaults)} default(s), {nonempty} non-empty",
             )
         if defaults[0].endswith(("\\", "`")):
             raise SyncError(
-                DOCKERFILE,
+                df,
                 f"ARG {name}= must use a single-line default; continuations are unsupported",
             )
         values[name] = defaults[0]
@@ -241,9 +257,10 @@ def render_readme(dockerfile_text: str, readme_text: str) -> tuple[str, list[str
 
 
 def check_or_write(write: bool) -> int:
-    dockerfile_text = DOCKERFILE.read_text(encoding="utf-8")
+    # docker_arg_defaults() now reads each ARG from its owning Dockerfile directly;
+    # the dockerfile_text argument is kept for compatibility but is not used.
     readme_text = README.read_text(encoding="utf-8")
-    rendered, changed = render_readme(dockerfile_text, readme_text)
+    rendered, changed = render_readme("", readme_text)
 
     if rendered == readme_text:
         print("README component metadata is in sync.")

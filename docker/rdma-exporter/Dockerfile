@@ -29,8 +29,7 @@
 
 FROM debian:12-slim AS fetch
 
-# Matches the rdma_setup role's pinned default (0.3.0); latest upstream is 0.4.2.
-ARG RDMA_EXPORTER_VERSION=0.3.0
+ARG RDMA_EXPORTER_VERSION=0.7.3
 # Provided by buildx; default keeps a plain `docker build` working on x86_64.
 ARG TARGETARCH=amd64
 
