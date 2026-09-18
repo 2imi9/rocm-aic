@@ -32,33 +32,13 @@
 #     -f docker/vllm/Dockerfile \
 #     -t aic-vllm:emulate .
 
-# ---- Import base wheel build artifacts via named build-context ---------------
-# The caller passes --build-context base=docker-image://aic-base:TAG.
-# We reference the internal stage names build_pytorch and build_torchvision to
-# bind-mount their wheel directories below.
-FROM base AS build_pytorch
-FROM base AS build_torchvision
-
 # =============================================================================
-# vLLM stage — torch + torchvision (from base) + vLLM + llm-emu plugin.
+# vLLM stage — inherits from the final stage of docker/base/ (build_torchvision)
+# which already has pytorch + torchvision installed system-wide.
 # =============================================================================
 FROM base AS vllm
 
 ARG ROCM_ARCH
-
-# Install gcc-13 runtime (needed for the ABI of torch 2.13 source-built symbols).
-# hadolint ignore=DL3008
-RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
-    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
-    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        gcc-13 g++-13 && \
-    update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-13 130 \
-        --slave /usr/bin/g++ g++ /usr/bin/g++-13
-
-RUN --mount=type=bind,from=build_pytorch,source=/app/pytorch/dist,target=/opt/pytorch-dist,ro \
-    --mount=type=bind,from=build_torchvision,source=/app/vision/dist,target=/opt/torchvision-dist,ro \
-    --mount=type=cache,target=/root/.cache/pip \
-    pip3 install /opt/pytorch-dist/*.whl /opt/torchvision-dist/*.whl
 
 # vLLM: built from source at this tag.
 ARG VLLM_GIT_URL=https://github.com/vllm-project/vllm.git

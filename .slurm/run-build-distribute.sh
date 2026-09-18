@@ -1007,21 +1007,8 @@ docker buildx prune --builder ${AIC_BUILDX_BUILDER} --force 2>/dev/null || true
 _droot="\$(docker info --format '{{.DockerRootDir}}' 2>/dev/null)"
 [ -d "\${_droot:-}" ] || _droot=/
 echo "[build] disk after prune (\${_droot}): \$(df -h "\${_droot}" | tail -1)"
-# Step 1: build aic-base (pytorch + torchvision) and load into local daemon.
-# This stage is shared by vllm and lmcache images.
-_base_tag="${AIC_IMAGE%:*}-base:${AIC_IMAGE##*:}"
-echo "[build] building aic-base image: \${_base_tag}"
-docker buildx build --builder ${AIC_BUILDX_BUILDER} --progress=plain --load \
-    --build-arg ROCM_ARCH="${AIC_ROCM_ARCH}" \
-    ${_secret_arg} \
-    ${_cache_args} \
-    -f "${AIC_DAY_DIR}/docker/base/Dockerfile" \
-    -t "\${_base_tag}" \
-    "${AIC_DAY_DIR}"
-echo "[build] aic-base built; building ${AIC_BUILD_DOCKERFILE:-docker/lmcache/Dockerfile} image: ${AIC_IMAGE}"
-# Step 2: build the service image using aic-base as the named build context
-# so the pytorch wheels are reused without rebuilding.
 tmp="${tarball}.partial.\$\$"
+echo "[build] building docker/${AIC_BUILD_DOCKERFILE:-Dockerfile} image: ${AIC_IMAGE}"
 docker buildx build --builder ${AIC_BUILDX_BUILDER} --progress=plain --output type=docker,dest=- \
     --build-arg ROCM_ARCH="${AIC_ROCM_ARCH}" \
     --build-arg AIC_UCX_FAST="${AIC_UCX_FAST}" \
@@ -1030,8 +1017,7 @@ docker buildx build --builder ${AIC_BUILDX_BUILDER} --progress=plain --output ty
     ${_target_arg} \
     ${_secret_arg} \
     ${_cache_args} \
-    --build-context base=docker-image://\${_base_tag} \
-    -f "${AIC_DAY_DIR}/${AIC_BUILD_DOCKERFILE:-docker/lmcache/Dockerfile}" \
+    -f "${AIC_DAY_DIR}/docker/${AIC_BUILD_DOCKERFILE:-Dockerfile}" \
     -t "${AIC_IMAGE}" \
     -t "${latest_ref}" \
     "${AIC_DAY_DIR}" | ${COMPRESS_CMD} > "\${tmp}"
@@ -1059,13 +1045,6 @@ command -v docker >/dev/null 2>&1 || { echo "docker not found on build node \$(h
 echo "[build] host=\$(hostname) docker=\$(docker --version)"
 cd "${AIC_DAY_DIR}"
 ${_builder_setup}
-_base_tag="${AIC_IMAGE%:*}-base:${AIC_IMAGE##*:}"
-DOCKER_BUILDKIT=1 docker build \
-    --build-arg ROCM_ARCH="${AIC_ROCM_ARCH}" \
-    ${_secret_arg} \
-    -f "${AIC_DAY_DIR}/docker/base/Dockerfile" \
-    -t "\${_base_tag}" \
-    "${AIC_DAY_DIR}"
 ${_build_program} \
     --build-arg ROCM_ARCH="${AIC_ROCM_ARCH}" \
     --build-arg AIC_UCX_FAST="${AIC_UCX_FAST}" \
@@ -1073,8 +1052,7 @@ ${_build_program} \
     ${_vllm_device_arg} \
     ${_target_arg} \
     ${_secret_arg} \
-    --build-context base=docker-image://\${_base_tag} \
-    -f "${AIC_DAY_DIR}/${AIC_BUILD_DOCKERFILE:-docker/lmcache/Dockerfile}" \
+    -f "${AIC_DAY_DIR}/docker/${AIC_BUILD_DOCKERFILE:-Dockerfile}" \
     -t "${AIC_IMAGE}" \
     -t "${latest_ref}" \
     "${AIC_DAY_DIR}"
@@ -1134,8 +1112,8 @@ cmd_build_emulate() {
     _use_emulate_image
     AIC_BUILD_TARGET="emulate"
     AIC_VLLM_TARGET_DEVICE="${AIC_EMULATE_VLLM_DEVICE}"
-    # Emulate stage lives in docker/vllm/Dockerfile (vllm+llm-emu, no lmcache deps).
-    AIC_BUILD_DOCKERFILE="docker/vllm/Dockerfile"
+    # Emulate stage lives in the combined docker/Dockerfile.
+    AIC_BUILD_DOCKERFILE="Dockerfile"
     log "build-emulate: emulation-only image, no GPU kernels compiled"
     cmd_build
 }

@@ -168,3 +168,14 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     CMAKE_C_COMPILER_LAUNCHER=ccache \
     CMAKE_CXX_COMPILER_LAUNCHER=ccache \
         python3 setup.py bdist_wheel --dist-dir=/app/vision/dist
+
+# =============================================================================
+# runtime — default target: pytorch + torchvision installed system-wide.
+# Downstream Dockerfiles (docker/vllm, docker/lmcache) use this stage via
+# --build-context base=docker/base so they get a fully working torch env
+# without bind-mounting intermediate wheel directories.
+# =============================================================================
+FROM build_torchvision AS runtime
+
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip3 install --no-cache-dir /app/vision/dist/*.whl
