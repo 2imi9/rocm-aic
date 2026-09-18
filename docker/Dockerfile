@@ -175,7 +175,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 # --build-context base=docker/base so they get a fully working torch env
 # without bind-mounting intermediate wheel directories.
 # =============================================================================
-FROM build_torchvision AS runtime
+FROM build_torchvision AS base_runtime
 
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip3 install --no-cache-dir /app/vision/dist/*.whl
@@ -184,7 +184,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 # vLLM stage — inherits from the final stage of docker/base/ (build_torchvision)
 # which already has pytorch + torchvision installed system-wide.
 # =============================================================================
-FROM build_torchvision AS vllm
+FROM base_runtime AS vllm
 
 ARG ROCM_ARCH
 
@@ -528,4 +528,8 @@ FROM scratch AS wheels
 COPY --from=build /wheels /
 
 # ----- 10. Runtime image (default target) ------------------------------------
+# Resets the entrypoint to vLLM: the lmcache build stage sets it to
+# lmcache.server, but the default target must serve vLLM (the compose
+# lmcache service overrides the entrypoint via its entrypoint: directive).
 FROM build AS runtime
+ENTRYPOINT ["python3", "-m", "vllm.entrypoints.openai.api_server"]

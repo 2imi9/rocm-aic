@@ -1173,7 +1173,7 @@ endif
 endif
 ifeq ($(AIC_SPUR_CLUSTER),1)
 _CLIFF_SPUR_CTL  := SPUR_CONTROLLER_ADDR=$(AIC_SPUR_CONTROLLER)
-_CLIFF_SBATCH_ARGS := --partition=amd-spur --constraint= --gpus=$(AIC_CLIFF_GPUS) \
+_CLIFF_SBATCH_ARGS := --partition=amd-spur --constraint= --gres= --gpus=$(AIC_CLIFF_GPUS) \
     $(if $(AIC_CLIFF_NODE),--nodelist=$(AIC_CLIFF_NODE),)
 # SPUR sbatch does not support --parsable or --no-requeue; parse job id from "Submitted batch job N"
 _CLIFF_SUBMIT     = $(_CLIFF_SPUR_CTL) $(_CLIFF_STRIP) sbatch \
